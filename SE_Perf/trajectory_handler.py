@@ -1,0 +1,186 @@
+"""
+轨迹池处理模块
+
+负责从 PerfAgentResult 构建轨迹数据、更新轨迹池、
+以及迭代后处理（.tra 生成 + 轨迹池汇总）。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from core.utils.se_logger import get_se_logger
+from core.utils.traj_pool_manager import TrajPoolManager
+from core.utils.trajectory_processor import TrajectoryProcessor
+from perf_config import SEPerfRunSEConfig, StepConfig
+from run_helpers import extract_optimization_info
+from run_models import TrajectoryData
+
+from perfagent.protocols import PerfAgentResult
+
+logger = get_se_logger("trajectory_handler", emoji="📊")
+
+
+# ---------------------------------------------------------------------------
+# 轨迹构建
+# ---------------------------------------------------------------------------
+
+
+def build_trajectory_from_result(
+    result: PerfAgentResult,
+    instance_name: str,
+    problem_description: str,
+    iteration_index: int,
+    label: str,
+    source_labels: list[str],
+    operator_name: str | None,
+    output_dir: Path,
+) -> TrajectoryData:
+    """直接从 PerfAgentResult 构建轨迹数据，避免文件 I/O 中转。"""
+    # 从优化历史构建轨迹内容
+    tra_parts: list[str] = []
+    for step in result.optimization_history or []:
+        step_str = f"Step {step.get('iteration', '?')}: "
+        if step.get("performance") is not None:
+            step_str += f"performance={step['performance']}"
+        if step.get("code_changed"):
+            step_str += " [code changed]"
+        tra_parts.append(step_str)
+
+    # 构建性能指标
+    perf_metrics = dict(result.final_metrics or {})
+    if "performance" not in perf_metrics and result.final_performance is not None:
+        perf_metrics["performance"] = result.final_performance
+
+    return TrajectoryData(
+        label=label,
+        instance_name=instance_name,
+        problem_description=problem_description,
+        trajectory_content="\n".join(tra_parts),
+        patch_content=result.optimized_code or "",
+        iteration=iteration_index,
+        performance=result.final_performance,
+        source_dir=str(output_dir),
+        source_entry_labels=list(source_labels or []),
+        operator_name=str(operator_name) if operator_name else None,
+        perf_metrics=perf_metrics,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 轨迹池更新
+# ---------------------------------------------------------------------------
+
+
+def update_pool_from_result(
+    result: PerfAgentResult,
+    instance_name: str,
+    problem_description: str,
+    iteration_index: int,
+    traj_pool_manager: TrajPoolManager,
+    se_cfg: SEPerfRunSEConfig,
+    run_logger,
+    label_prefix: str | None = None,
+    source_labels: list[str] | None = None,
+    operator_name: str | None = None,
+    output_dir: Path | None = None,
+) -> None:
+    """直接从 PerfAgentResult 更新轨迹池，绕过文件 I/O。"""
+    try:
+        if isinstance(se_cfg.prompt_config, dict):
+            traj_pool_manager.prompt_config = se_cfg.prompt_config
+
+        label = str(label_prefix) if label_prefix else f"iter{iteration_index}"
+        traj_data = build_trajectory_from_result(
+            result=result,
+            instance_name=instance_name,
+            problem_description=problem_description,
+            iteration_index=iteration_index,
+            label=label,
+            source_labels=source_labels or [],
+            operator_name=operator_name,
+            output_dir=output_dir or Path("."),
+        )
+
+        traj_pool_manager.summarize_and_add_trajectories(
+            [traj_data.to_dict()], num_workers=se_cfg.num_workers,
+        )
+
+        pool_stats = traj_pool_manager.get_pool_stats()
+        run_logger.info(f"轨迹池更新完毕（直接模式）: 当前共 {pool_stats.get('total_trajectories', 'unknown')} 条轨迹")
+    except Exception as e:
+        run_logger.error(f"直接模式轨迹池更新失败: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 后处理入口
+# ---------------------------------------------------------------------------
+
+
+def process_and_summarize(
+    iter_dir: Path,
+    iter_idx: int,
+    step: StepConfig,
+    se_cfg: SEPerfRunSEConfig,
+    pool_manager: TrajPoolManager,
+    run_logger,
+    label_prefix: str | None = None,
+    source_labels_map: dict[str, list[str]] | None = None,
+    operator_name: str | None = None,
+    result: PerfAgentResult | None = None,
+    instance_name: str = "",
+    problem_description: str | None = None,
+):
+    """后处理：生成 .tra 文件并从 PerfAgentResult 更新轨迹池。"""
+    try:
+        # 始终生成 .tra 文件（用于持久化和调试）
+        processor = TrajectoryProcessor()
+        tra_stats = processor.process_iteration_directory(iter_dir)
+
+        if not tra_stats or tra_stats.get("total_tra_files", 0) <= 0:
+            run_logger.warning(f"迭代 {iter_idx} 未生成 .tra 文件")
+
+        # 准备 optimization info for prompt config
+        perf_cfg_path = step.perf_base_config or se_cfg.base_config
+        opt_target, lang_val = extract_optimization_info(perf_cfg_path)
+        if opt_target or lang_val:
+            pc = se_cfg.prompt_config
+            scfg = pc.setdefault("summarizer", {})
+            if opt_target:
+                scfg["optimization_target"] = opt_target
+            if lang_val:
+                scfg["language"] = lang_val
+
+        # 直接从 PerfAgentResult 更新轨迹池
+        source_labels = None
+        if source_labels_map and isinstance(source_labels_map, dict):
+            source_labels = source_labels_map.get(instance_name)
+        update_pool_from_result(
+            result=result,
+            instance_name=instance_name,
+            problem_description=problem_description or "",
+            iteration_index=iter_idx,
+            traj_pool_manager=pool_manager,
+            se_cfg=se_cfg,
+            run_logger=run_logger,
+            label_prefix=label_prefix,
+            source_labels=source_labels,
+            operator_name=operator_name,
+            output_dir=iter_dir / instance_name,
+        )
+
+        # 保存记忆快照
+        try:
+            mm = getattr(pool_manager, "memory_manager", None)
+            if mm is not None:
+                mem = mm.load()
+                ckpt_path = Path(iter_dir) / f"memory_iter_{iter_idx}.json"
+                with open(ckpt_path, "w", encoding="utf-8") as f:
+                    json.dump(mem, f, ensure_ascii=False, indent=2)
+                run_logger.info(f"已保存迭代 {iter_idx} 的记忆快照: {ckpt_path}")
+        except Exception as e:
+            run_logger.warning(f"保存迭代 {iter_idx} 记忆快照失败: {e}")
+    except Exception as e:
+        run_logger.error(f"迭代 {iter_idx} 后处理失败: {e}")
