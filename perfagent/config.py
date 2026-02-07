@@ -1,17 +1,15 @@
 """
 PerfAgent 配置系统
 
-模仿 sweagent 的配置结构，提供灵活的 agent 参数配置。
+提供通用的 agent 参数配置。任务特定配置通过 task_config 字典传递给 TaskRunner。
 """
 
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
-
-# 内联所有配置类，移除独立的 config_components 目录
 
 
 @dataclass
@@ -36,30 +34,6 @@ class ModelConfig:
 
 
 @dataclass
-class OptimizationConfig:
-    """优化方向配置"""
-
-    target: Literal["runtime", "memory", "integral"] = "runtime"  # 允许: "runtime" 或 "memory" 或 "integral"
-    enable_memory_checks: bool = True
-    enable_runtime_checks: bool = True
-    adopt_only_if_improved: bool = False
-    code_generation_mode: Literal["diff", "direct"] = "diff"
-    # 是否在 metrics 中包含非 target 的其他指标（如 runtime, memory, integral）
-    include_other_metrics_in_summary: bool = True
-
-
-@dataclass
-class RuntimeConfig:
-    """运行时资源限制"""
-
-    time_limit: int = 20  # 秒
-    memory_limit: int = 1024  # MB
-    max_workers: int = 4
-    num_runs: int = 10
-    trim_ratio: float = 0.1
-
-
-@dataclass
 class LoggingConfig:
     save_trajectory: bool = True
     trajectory_dir: Path = Path("./trajectories")
@@ -79,26 +53,12 @@ class PromptConfig:
 
 
 @dataclass
-class LanguageConfig:
-    language: str = "python3"
-    supported_languages: list[str] = field(default_factory=lambda: ["python3", "cpp", "java", "javascript", "golang"])
-
-
-@dataclass
-class OverridesConfig:
-    """可选的覆盖项配置
-
-    - initial_code_dir: 指定每实例初始代码的目录（按实例名匹配文件）
-    - initial_code_text: 直接提供初始代码文本（优先于目录）
-    """
-
-    initial_code_dir: Path | None = None
-    initial_code_text: str | None = None
-
-
-@dataclass
 class PerfAgentConfig:
-    """PerfAgent 配置类（模块化集成）"""
+    """PerfAgent 配置类（通用，任务无关）
+
+    任务特定的配置（如优化目标、运行时限制、语言等）统一放入
+    task_config 字典，由 TaskRunner 负责解释。
+    """
 
     # 迭代控制
     max_iterations: int = 10
@@ -107,32 +67,25 @@ class PerfAgentConfig:
     # 顶层并发控制（用于批量并行运行 run.py 子进程）
     max_workers: int = 4
 
+    # 从 OptimizationConfig 提升的通用字段
+    adopt_only_if_improved: bool = False
+
     # 组件配置
     model: ModelConfig = field(default_factory=ModelConfig)
-    optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
-    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     prompts: PromptConfig = field(default_factory=PromptConfig)
-    language_cfg: LanguageConfig = field(default_factory=LanguageConfig)
-    overrides: OverridesConfig = field(default_factory=OverridesConfig)
+
+    # 任务特定配置（不透明字典，由 TaskRunner 解释）
+    task_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        """初始化后处理，将旧字段同步到新组件，并验证目录与模板"""
-        # 验证参数
+        """初始化后处理：验证参数并确保目录存在"""
         self._validate_config()
-
-        # 确保目录存在
         self.logging.trajectory_dir.mkdir(parents=True, exist_ok=True)
         self.logging.log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 加载默认模板（组件字段）
-        if not self.prompts.system_template:
-            self.prompts.system_template = self._load_default_system_template()
-        if not self.prompts.optimization_template:
-            self.prompts.optimization_template = self._load_default_optimization_template()
-
     def apply_cli_overrides(self, args: Any) -> None:
-        """根据 CLI 参数覆盖配置，仅在单一配置文件中完成所有映射。"""
+        """根据 CLI 参数覆盖配置。"""
         # 基础覆盖
         if getattr(args, "max_iterations", None) is not None:
             self.max_iterations = args.max_iterations
@@ -146,14 +99,6 @@ class PerfAgentConfig:
             self.logging.log_dir = args.log_dir
         if getattr(args, "log_level", None):
             self.logging.log_level = args.log_level
-
-        # 语言与优化方向
-        if getattr(args, "language", None):
-            self.language_cfg.language = args.language
-        if getattr(args, "opt_target", None):
-            self.optimization.target = args.opt_target
-        if getattr(args, "include_other_metrics", None) is not None:
-            self.optimization.include_other_metrics_in_summary = args.include_other_metrics
 
         # LLM 客户端配置
         if getattr(args, "llm_use", False):
@@ -187,11 +132,13 @@ class PerfAgentConfig:
         if getattr(args, "early_stop_no_improve", None) is not None:
             self.early_stop_no_improve = args.early_stop_no_improve
 
-        # 初始代码目录（按实例名匹配），规范化为 Path
-        if getattr(args, "initial_code_dir", None) is not None and self.overrides is not None:
-            icd = args.initial_code_dir
-            if isinstance(icd, (str, Path)):
-                self.overrides.initial_code_dir = Path(icd)
+        # 任务特定覆盖写入 task_config
+        if getattr(args, "language", None):
+            self.task_config["language"] = args.language
+        if getattr(args, "opt_target", None):
+            self.task_config["target"] = args.opt_target
+        if getattr(args, "include_other_metrics", None) is not None:
+            self.task_config["include_other_metrics_in_summary"] = args.include_other_metrics
 
     def _validate_config(self):
         """验证配置参数"""
@@ -201,11 +148,6 @@ class PerfAgentConfig:
             raise ValueError("max_workers must be at least 1")
         if not (0.0 <= self.model.temperature <= 1.0):
             raise ValueError("model.temperature must be between 0.0 and 1.0")
-        if self.runtime.num_runs < 1:
-            raise ValueError("runtime.num_runs must be at least 1")
-        # 优化方向校验
-        if self.optimization.target not in ("runtime", "memory", "integral"):
-            raise ValueError("optimization.target must be 'runtime' or 'memory' or 'integral'")
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典（嵌套组件序列化，并处理 Path）"""
@@ -216,28 +158,21 @@ class PerfAgentConfig:
                 data["logging"]["log_dir"] = str(data["logging"]["log_dir"])
             if isinstance(data["logging"].get("trajectory_dir"), Path):
                 data["logging"]["trajectory_dir"] = str(data["logging"]["trajectory_dir"])
-        # prompts 中无需特殊处理
-        # 处理 overrides 中的 Path 字段
-        if "overrides" in data and isinstance(data["overrides"], dict):
-            icd = data["overrides"].get("initial_code_dir")
-            if isinstance(icd, Path):
-                data["overrides"]["initial_code_dir"] = str(icd)
         return data
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "PerfAgentConfig":
-        """从字典创建配置（严格使用嵌套组件键，不再支持旧顶层键）"""
+        """从字典创建配置
+
+        支持新格式（task_config）和旧格式（optimization/runtime/language_cfg）的向后兼容。
+        """
         cfg = config_dict.copy() if config_dict else {}
 
-        # model（仅从嵌套 model 读取）
+        # model
         model_dict = cfg.get("model", {}) or {}
         model_cfg = ModelConfig(**model_dict)
 
-        # runtime（仅从嵌套 runtime 读取）
-        runtime_dict = cfg.get("runtime", {}) or {}
-        runtime_cfg = RuntimeConfig(**runtime_dict)
-
-        # logging（仅从嵌套 logging 读取，并处理路径类型）
+        # logging
         logging_dict = cfg.get("logging", {}) or {}
         if "trajectory_dir" in logging_dict and isinstance(logging_dict["trajectory_dir"], str):
             logging_dict["trajectory_dir"] = Path(logging_dict["trajectory_dir"])
@@ -245,25 +180,35 @@ class PerfAgentConfig:
             logging_dict["log_dir"] = Path(logging_dict["log_dir"])
         logging_cfg = LoggingConfig(**logging_dict)
 
-        # prompts（仅从嵌套 prompts 读取）
+        # prompts
         prompts_dict = cfg.get("prompts", {}) or {}
         prompts_cfg = PromptConfig(**prompts_dict)
 
-        # optimization（仅从嵌套 optimization 读取）
-        optimization_dict = cfg.get("optimization", {}) or {}
-        optimization_cfg = OptimizationConfig(**optimization_dict)
+        # task_config（新格式优先）
+        task_config = cfg.get("task_config", {}) or {}
 
-        # language（仅从嵌套 language_cfg 读取）
-        language_dict = cfg.get("language_cfg", {}) or {}
-        language_cfg = LanguageConfig(**language_dict)
+        # 向后兼容：从旧的嵌套键（optimization/runtime/language_cfg）迁移到 task_config
+        if not task_config:
+            old_opt = cfg.get("optimization", {}) or {}
+            old_runtime = cfg.get("runtime", {}) or {}
+            old_lang = cfg.get("language_cfg", {}) or {}
+            merged: dict[str, Any] = {}
+            for k, v in old_opt.items():
+                if k != "adopt_only_if_improved":
+                    merged[k] = v
+            merged.update(old_runtime)
+            if "language" in old_lang:
+                merged["language"] = old_lang["language"]
+            if merged:
+                task_config = merged
 
-        # overrides（可选嵌套）
-        overrides_dict = cfg.get("overrides", {}) or {}
-        if "initial_code_dir" in overrides_dict and isinstance(overrides_dict["initial_code_dir"], str):
-            overrides_dict["initial_code_dir"] = Path(overrides_dict["initial_code_dir"])
-        overrides_cfg = OverridesConfig(**overrides_dict)
+        # adopt_only_if_improved: 顶层 > 旧 optimization section
+        adopt_only_if_improved = cfg.get("adopt_only_if_improved", None)
+        if adopt_only_if_improved is None:
+            old_opt = cfg.get("optimization", {}) or {}
+            adopt_only_if_improved = old_opt.get("adopt_only_if_improved", False)
 
-        # 顶层允许的键
+        # 顶层标量字段
         max_iterations = cfg.get("max_iterations", 10)
         early_stop_no_improve = cfg.get("early_stop_no_improve", 0)
         max_workers = cfg.get("max_workers", 4)
@@ -271,116 +216,26 @@ class PerfAgentConfig:
         return cls(
             max_iterations=max_iterations,
             model=model_cfg,
-            optimization=optimization_cfg,
-            runtime=runtime_cfg,
             logging=logging_cfg,
             prompts=prompts_cfg,
-            language_cfg=language_cfg,
             early_stop_no_improve=early_stop_no_improve,
             max_workers=max_workers,
-            overrides=overrides_cfg,
+            adopt_only_if_improved=adopt_only_if_improved,
+            task_config=task_config,
         )
 
     @classmethod
     def from_yaml(cls, config_path: Path) -> "PerfAgentConfig":
-        """从 YAML 文件加载配置（严格使用嵌套键）"""
+        """从 YAML 文件加载配置"""
         with open(config_path, encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
         return cls.from_dict(config_data)
 
     def to_yaml(self, config_path: Path) -> None:
-        """保存配置到 YAML 文件（序列化嵌套组件）"""
+        """保存配置到 YAML 文件"""
         config_data = self.to_dict()
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
-
-    def _load_default_system_template(self) -> str:
-        """加载默认系统模板"""
-        if self.optimization.code_generation_mode == "direct":
-            return """你是一个专业的代码性能优化专家。你的任务是分析给定的代码，识别性能瓶颈，并提供优化建议。
-
-你需要：
-1. 仔细分析当前代码的性能问题
-2. 考虑算法复杂度、数据结构选择、内存使用因素
-3. 提供具体的优化方案，直接输出优化后的完整代码
-4. 确保优化后的代码功能正确性不变
-5. 优先考虑时间复杂度的改进
-
-请始终保持代码的可读性和可维护性。
-
-请输出完整代码，包含在 Markdown 代码块中（例如 ```python ... ```）。
-"""
-        return """你是一个专业的代码性能优化专家。你的任务是分析给定的代码，识别性能瓶颈，并提供优化建议。
-
-你需要：
-1. 仔细分析当前代码的性能问题
-2. 考虑算法复杂度、数据结构选择、内存使用因素
-3. 提供具体的优化方案，以 SEARCH/REPLACE 区块格式输出代码修改
-4. 确保优化后的代码功能正确性不变
-5. 优先考虑时间复杂度和空间复杂度的改进
-
-请始终保持代码的可读性和可维护性。
-
-严格输出如下格式的区块：
-<<<<<<< SEARCH
-（在原代码中需要完全匹配的连续片段，保持缩进与空格一致）
-=======
-（替换为的新代码片段）
->>>>>>> REPLACE
-"""
-
-    def _load_default_optimization_template(self) -> str:
-        """加载默认优化模板"""
-        if self.optimization.code_generation_mode == "direct":
-            return """基于以下信息，请优化代码性能：
-
-当前代码：
-```{language}
-{current_code}
-```
-
-性能分析结果：
-{performance_analysis}
-
-历史优化记录：
-{optimization_history}
-
-请提供优化方案，格式要求：
-1. 简要说明优化思路（中文说明）
-2. 直接输出优化后的完整代码，使用 Markdown 代码块包裹。
-
-优化方案：
-"""
-        return """基于以下信息，请优化代码性能：
-
-当前代码：
-```{language}
-{current_code}
-```
-
-性能分析结果：
-{performance_analysis}
-
-历史优化记录：
-{optimization_history}
-
-请提供优化方案，格式要求：
-1. 简要说明优化思路（中文说明）
-2. 仅输出一个或多个 SEARCH/REPLACE 区块，严格遵守以下格式：
-
-<<<<<<< SEARCH
-（原代码中完整存在的片段，必须精确匹配，包括换行与空格）
-=======
-（替换为的新代码片段）
->>>>>>> REPLACE
-
-注意：
-- 可以包含多个区块，按实际需要逐个给出；
-- 不要输出 ```diff 或 @@ 格式；
-- 不要在区块中加入额外解释文字；
-
-优化方案：
-"""
 
 
 def load_config(config_path: Path | None = None) -> PerfAgentConfig:

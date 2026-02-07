@@ -87,12 +87,16 @@ if __name__ == "__main__":
 """
 
 
+TEST_SYSTEM_TEMPLATE = "You are a code optimizer. Language: {language}. Target: {optimization_target}.\n{task_description}\n{additional_requirements}\n{local_memory}\n{global_memory}\n{allowed_imports_scope}"
+TEST_OPTIMIZATION_TEMPLATE = "Optimize:\n{current_program}\nMetrics:\n{current_metrics}\nArtifacts:\n{current_artifacts_section}"
+
+
 @pytest.fixture
 def fake_llm():
     """提供一个假的 LLM 客户端，避免测试依赖真实接口。"""
 
     class FakeLLM:
-        def call_llm(self, messages, temperature: float = 0.3, max_tokens=None) -> str:
+        def call_llm(self, messages, temperature: float = 0.3, max_tokens=None, **kwargs) -> str:
             # 返回一个通用的 SEARCH/REPLACE 区块；若无法匹配则代码不变化
             return "<<<<<<< SEARCH\nold code snippet\n=======\nnew code snippet\n>>>>>>> REPLACE"
 
@@ -159,7 +163,9 @@ def default_config(temp_dir):
     """默认测试配置"""
     from perfagent.config import PerfAgentConfig
 
-    return PerfAgentConfig(trajectory_dir=temp_dir / "trajectories", max_iterations=2)
+    cfg = PerfAgentConfig(max_iterations=2)
+    cfg.logging.trajectory_dir = temp_dir / "trajectories"
+    return cfg
 
 
 @pytest.fixture

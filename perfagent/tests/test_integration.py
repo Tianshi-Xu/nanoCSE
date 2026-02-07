@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from perfagent.agent import EffiBenchXInstance, PerfAgent
-from perfagent.config import LoggingConfig, ModelConfig, PerfAgentConfig
+from perfagent.config import LoggingConfig, ModelConfig, PerfAgentConfig  # noqa: F401
 
 
 class TestIntegration:
@@ -51,10 +51,19 @@ if __name__ == "__main__":
     @pytest.fixture
     def config(self, temp_dir):
         """创建测试配置"""
+        from conftest import TEST_OPTIMIZATION_TEMPLATE, TEST_SYSTEM_TEMPLATE
+
+        from perfagent.config import PromptConfig
+
         cfg = PerfAgentConfig(
             max_iterations=2,  # 减少迭代次数以加快测试
             model=ModelConfig(name="gpt-4", temperature=0.1),
             logging=LoggingConfig(trajectory_dir=temp_dir / "trajectories"),
+            prompts=PromptConfig(
+                system_template=TEST_SYSTEM_TEMPLATE,
+                optimization_template=TEST_OPTIMIZATION_TEMPLATE,
+            ),
+            task_config={"language": "python3"},
         )
         return cfg
 
@@ -64,7 +73,7 @@ if __name__ == "__main__":
         agent = PerfAgent(config)
         # 注入假的 LLM 客户端，避免真实调用
         agent.llm_client = fake_llm
-        agent.config.language_cfg.language = "python3"
+        agent.config.task_config["language"] = "python3"
 
         # 创建实例数据（dataclass）
         inst = EffiBenchXInstance(
@@ -85,7 +94,7 @@ if __name__ == "__main__":
 
         # 验证结果
         assert "success" in result
-        assert "final_performance" in result
+        assert "metric" in result
         assert "trajectory_file" in result
 
         # 验证轨迹文件是否创建
@@ -164,7 +173,7 @@ max_iterations: 2
 
         agent = PerfAgent(config)
         agent.llm_client = fake_llm
-        agent.config.language_cfg.language = "python3"
+        agent.config.task_config["language"] = "python3"
 
         # 创建实例数据（dataclass）
         inst = EffiBenchXInstance(
@@ -186,51 +195,26 @@ max_iterations: 2
         # 验证错误被正确处理
         assert "success" in result
 
-    def test_performance_improvement_detection(self, config, test_instance_file):
-        """测试性能改进检测"""
-        agent = PerfAgent(config)
-        agent.config.language_cfg.language = "python3"
+    def test_performance_improvement_detection(self, config):
+        """测试性能改进检测（通过 EffiBenchRunner）"""
+        from perfagent.tasks.effibench import EffiBenchRunner
 
-        # 创建测试数据
-        test_cases = ["test_case_1"]
+        runner = EffiBenchRunner(task_config=config.task_config)
         inst = EffiBenchXInstance(
             id="test_instance", title="", title_slug="", description="", description_md="", source="", url="", type=""
         )
 
-        # 获取初始性能
-        initial_code = open(test_instance_file).read()
-        initial_performance = agent._evaluate_performance("python3", initial_code, test_cases, inst)
-        assert "performance_analysis" in initial_performance
-
-        # 创建一个改进版本的代码
-        improved_code = """
-def efficient_sum(n):
-    # 使用数学公式计算三角数
-    return n * (n - 1) // 2
-
-def main():
-    import time
-    start_time = time.time()
-    result = efficient_sum(1000)
-    end_time = time.time()
-    print(f"结果: {result}")
-    print(f"执行时间: {end_time - start_time:.4f}秒")
-
-if __name__ == "__main__":
-    main()
-"""
-
-        # 获取改进后的性能
-        improved_performance = agent._evaluate_performance("python3", improved_code, test_cases, inst)
-
-        # 验证性能指标存在
-        assert "performance_analysis" in improved_performance
+        # 没有 evaluator 和 test_cases 时应返回默认结果
+        code = "def efficient_sum(n):\n    return n * (n - 1) // 2\n"
+        metric, artifacts = runner.evaluate(code, inst, config)
+        assert isinstance(metric, float)
+        assert "problem_description" in artifacts
 
     def test_trajectory_completeness(self, config, test_instance_file, temp_dir, fake_llm):
         """测试轨迹完整性"""
         agent = PerfAgent(config)
         agent.llm_client = fake_llm
-        agent.config.language_cfg.language = "python3"
+        agent.config.task_config["language"] = "python3"
 
         inst = EffiBenchXInstance(
             id="traj_instance",
@@ -254,14 +238,14 @@ if __name__ == "__main__":
 
         assert ("metadata" in traj) or ("info" in traj)
         md = traj.get("metadata") or traj.get("info")
-        assert md.get("language") == "python3"
-        assert md.get("optimization_target") in ("runtime", "memory")
+        # 轨迹元数据不再由 agent 硬编码设置 language/optimization_target
+        assert md.get("instance_id") == "traj_instance"
 
     def test_multiple_iterations(self, config, temp_dir, fake_llm):
         """测试多次迭代流程"""
         agent = PerfAgent(config)
         agent.llm_client = fake_llm
-        agent.config.language_cfg.language = "python3"
+        agent.config.task_config["language"] = "python3"
 
         # 使用文件内容作为 starter_code
         test_file = temp_dir / "multi_iter.py"
@@ -288,4 +272,4 @@ def slow_loop():
 
         result = agent.run(inst)
         assert "success" in result
-        assert "final_performance" in result
+        assert "metric" in result

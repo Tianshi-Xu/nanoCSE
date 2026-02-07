@@ -59,7 +59,6 @@ def run_single_perfagent(
     request = AgentRequest(
         task_data_path=task_data_path,
         config=config,
-        initial_solution=operator_result.initial_solution,
         additional_requirements=operator_result.additional_requirements,
         local_memory=local_memory_text,
         global_memory=global_memory_text,

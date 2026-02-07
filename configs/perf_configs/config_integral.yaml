@@ -1,9 +1,10 @@
-# PerfAgent 配置文件示例（严格使用嵌套结构）
+# PerfAgent 配置文件示例（新格式：通用字段 + task_config）
 
 # 迭代控制
 max_iterations: 1
 early_stop_no_improve: 0
 max_workers: 10  # 批量并发的顶层控制（run_batch 并发度）
+adopt_only_if_improved: false
 
 # 模型配置
 model:
@@ -22,24 +23,6 @@ model:
   retry_jitter: 0.5
   log_inputs_outputs: true
   log_sanitize: true
-
-# 优化配置
-optimization:
-  target: "integral"         # 可选: runtime | memory ｜ integral
-  enable_memory_checks: true
-  enable_runtime_checks: true
-
-  adopt_only_if_improved: false
-  code_generation_mode: "direct"
-  include_other_metrics_in_summary: true
-
-# 运行时资源限制
-runtime:
-  time_limit: 10      # 每次评估的时间限制（秒）
-  memory_limit: 1024  # 内存限制（MB）
-  max_workers: 5      # 并发测试的最大工作线程数
-  num_runs: 5         # 性能测试运行次数
-  trim_ratio: 0.1     # 剪裁比例，用于稳健均值
 
 # 轨迹与日志
 logging:
@@ -92,12 +75,16 @@ prompts:
 
   include_all_history: false
 
-# 语言配置
-language_cfg:
+# 任务特定配置（由 EffiBenchRunner 解释）
+task_config:
+  target: "integral"           # 可选: runtime | memory | integral
+  code_generation_mode: "direct" # 可选: diff | direct
+  enable_memory_checks: true
+  enable_runtime_checks: true
+  include_other_metrics_in_summary: true
   language: "python3"
-  supported_languages:
-    - "python3"
-    - "cpp"
-    - "java"
-    - "javascript"
-    - "golang"
+  time_limit: 10       # 每次评估的时间限制（秒）
+  memory_limit: 1024   # 内存限制（MB）
+  max_workers: 5       # 并发测试的最大工作线程数
+  num_runs: 5          # 性能测试运行次数
+  trim_ratio: 0.1      # 剪裁比例，用于稳健均值

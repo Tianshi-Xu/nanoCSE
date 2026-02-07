@@ -9,6 +9,7 @@ EffiBench TaskRunner 实现
 - EffiBenchRunner 实现 BaseTaskRunner 的全部抽象方法。
 - evaluate() 返回 (metric, artifacts)，其中 metric 为优化目标值（越低越好），
   artifacts 包含 "problem_description" 及评估结果详情。
+- EffiBenchTaskConfig 封装所有 EffiBench 特定配置，从 PerfAgentConfig.task_config 解析。
 """
 
 from __future__ import annotations
@@ -28,6 +29,45 @@ from ..effibench.benchmark import run_performance_benchmark
 from ..effibench.utils import EFFIBENCH_REGISTRY
 from ..protocols import TaskMetadata
 from ..task_runner import BaseTaskRunner
+
+# ---------------------------------------------------------------------------
+# EffiBenchTaskConfig —— EffiBench 任务特定配置
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EffiBenchTaskConfig:
+    """EffiBench 任务特定配置
+
+    从 PerfAgentConfig.task_config 字典中解析，封装所有 EffiBench 专属参数。
+    原先散布在 OptimizationConfig、RuntimeConfig、LanguageConfig 中的字段
+    统一收拢于此。
+    """
+
+    # 优化方向
+    target: str = "runtime"  # runtime | memory | integral
+    code_generation_mode: str = "diff"  # diff | direct
+    enable_memory_checks: bool = True
+    enable_runtime_checks: bool = True
+    include_other_metrics_in_summary: bool = True
+
+    # 语言
+    language: str = "python3"
+
+    # 运行时资源限制
+    time_limit: int = 20  # 秒
+    memory_limit: int = 1024  # MB
+    max_workers: int = 4
+    num_runs: int = 10
+    trim_ratio: float = 0.1
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EffiBenchTaskConfig:
+        """从字典创建，忽略未知键"""
+        known_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
+
 
 # ---------------------------------------------------------------------------
 # EffiBenchXInstance 数据类（从 perfagent/agent.py 迁移）
@@ -144,34 +184,27 @@ class EffiBenchRunner(BaseTaskRunner):
     def __init__(
         self,
         *,
-        code_generation_mode: str = "diff",
+        task_config: dict[str, Any] | None = None,
+        code_generation_mode: str | None = None,
         _logger: logging.Logger | None = None,
     ):
         """
         Args:
-            code_generation_mode: 代码生成模式，"diff" 或 "direct"
+            task_config: 任务特定配置字典（来自 PerfAgentConfig.task_config）
+            code_generation_mode: 已弃用，使用 task_config 代替（向后兼容）
             _logger: 可选的 logger 实例
         """
         self._logger = _logger or logging.getLogger(__name__)
-        self._code_generation_mode = code_generation_mode
+
+        # 解析任务特定配置
+        tc = dict(task_config or {})
+        # 向后兼容：如果传入了旧的 code_generation_mode 参数
+        if code_generation_mode is not None and "code_generation_mode" not in tc:
+            tc["code_generation_mode"] = code_generation_mode
+        self._task_config = EffiBenchTaskConfig.from_dict(tc)
+
+        self._code_generation_mode = self._task_config.code_generation_mode
         self._diff_applier = DiffApplier()
-        # 跟踪上一次 get_initial_solution 的来源: "default" | "text" | "dir"
-        self._initial_code_source: str = "default"
-
-    # ------------------------------------------------------------------
-    # 属性
-    # ------------------------------------------------------------------
-
-    @property
-    def initial_code_source(self) -> str:
-        """上一次 get_initial_solution 调用的代码来源
-
-        Returns:
-            "default" — 使用了占位符代码
-            "text" — 使用了配置中的 initial_code_text
-            "dir" — 使用了 initial_code_dir 中的文件
-        """
-        return self._initial_code_source
 
     # ==================================================================
     # BaseTaskRunner 实现
@@ -212,65 +245,9 @@ class EffiBenchRunner(BaseTaskRunner):
     def get_initial_solution(self, instance_data: Any, config: Any) -> str:
         """提取或生成初始代码
 
-        优先级:
-        1) config.overrides.initial_code_text（直接文本）
-        2) config.overrides.initial_code_dir（按实例名匹配文件）
-        3) 默认占位符代码（根据语言）
+        返回默认占位符代码（根据语言配置）。
         """
-        instance: EffiBenchXInstance = instance_data
-        language = self._normalize_language(
-            getattr(getattr(config, "language_cfg", None), "language", None)
-        )
-
-        try:
-            self._initial_code_source = "default"
-
-            # 1) 直接文本覆盖
-            overrides = getattr(config, "overrides", None)
-            override_text = getattr(overrides, "initial_code_text", None) if overrides else None
-            if isinstance(override_text, str) and override_text.strip():
-                self._initial_code_source = "text"
-                return override_text if override_text.endswith("\n") else override_text + "\n"
-
-            # 2) 目录覆盖（按实例名匹配文件）
-            code_dir = getattr(overrides, "initial_code_dir", None) if overrides else None
-            task_name = getattr(instance, "task_name", None) or getattr(instance, "id", None)
-            if code_dir and task_name:
-                ext_map: dict[str, list[str]] = {
-                    "python3": [".py"],
-                    "cpp": [".cpp", ".cc", ".cxx"],
-                    "java": [".java"],
-                    "javascript": [".js", ".mjs"],
-                    "golang": [".go"],
-                }
-                candidates: list[Path] = []
-                for ext in ext_map.get(language, []):
-                    candidates.append(Path(code_dir) / f"{task_name}{ext}")
-                # 退化：任意匹配同名文件（不区分扩展名）
-                try:
-                    for fp in Path(code_dir).iterdir():
-                        if fp.is_file() and fp.stem == task_name and fp not in candidates:
-                            candidates.append(fp)
-                except Exception:
-                    pass
-
-                for fp in candidates:
-                    try:
-                        if fp.exists():
-                            code = fp.read_text(encoding="utf-8")
-                            if isinstance(code, str) and code.strip():
-                                self._logger.info(f"使用覆盖初始代码: {fp}")
-                                self._initial_code_source = "dir"
-                                return code if code.endswith("\n") else code + "\n"
-                    except Exception as e:
-                        self._logger.warning(f"读取初始代码文件失败 {fp}: {e}")
-
-        except Exception as e:
-            # 覆盖流程失败则回退到占位符
-            self._logger.warning(f"初始代码覆盖失败，使用默认占位符: {e}")
-
-        # 3) 默认占位符（保持现有测试兼容）
-        self._initial_code_source = "default"
+        language = self._task_config.language
         return self._get_default_placeholder(language)
 
     # ------------------------------------------------------------------
@@ -294,15 +271,13 @@ class EffiBenchRunner(BaseTaskRunner):
             - artifacts: 包含 problem_description、benchmark_results 等
         """
         instance: EffiBenchXInstance = instance_data
-        language = self._normalize_language(
-            getattr(getattr(config, "language_cfg", None), "language", None)
-        )
-        target = getattr(getattr(config, "optimization", None), "target", "runtime")
+        language = self._task_config.language
+        target = self._task_config.target
         test_cases = instance.generated_tests or []
 
         # 执行性能评估
         benchmark_results = self._run_benchmark_cascade(
-            language, solution, test_cases, instance, config
+            language, solution, test_cases, instance
         )
 
         # 提取标量指标
@@ -346,8 +321,8 @@ class EffiBenchRunner(BaseTaskRunner):
 
         Expected context keys:
             config: PerfAgentConfig 对象
-            language: str（可选，优先于 config）
-            optimization_target: str（可选，优先于 config）
+            language: str（可选，优先于 task_config）
+            optimization_target: str（可选，优先于 task_config）
             additional_requirements: str（可选，优先于 config）
             local_memory: str（可选）
             global_memory: str（可选）
@@ -355,12 +330,8 @@ class EffiBenchRunner(BaseTaskRunner):
         instance: EffiBenchXInstance = instance_data
         config = context.get("config")
 
-        language = context.get("language") or self._normalize_language(
-            getattr(getattr(config, "language_cfg", None), "language", None)
-        )
-        optimization_target = context.get("optimization_target") or getattr(
-            getattr(config, "optimization", None), "target", "runtime"
-        )
+        language = context.get("language") or self._task_config.language
+        optimization_target = context.get("optimization_target") or self._task_config.target
         additional_requirements = (
             context.get("additional_requirements")
             or getattr(getattr(config, "prompts", None), "additional_requirements", None)
@@ -383,34 +354,34 @@ class EffiBenchRunner(BaseTaskRunner):
         allowed_imports_scope = EFFIBENCH_REGISTRY.get(language, {}).get("imports", "")
         is_functional = (task_type or "").lower() == "functional"
 
+        # 从 config.prompts.system_template 获取模板，必须配置
         tmpl = (
             getattr(getattr(config, "prompts", None), "system_template", "")
             if config
             else ""
         )
-        if tmpl:
-            try:
-                base = tmpl.format(
-                    language=language,
-                    optimization_target=optimization_target,
-                    task_description=task_description,
-                    additional_requirements=additional_requirements,
-                    local_memory=local_memory,
-                    global_memory=global_memory,
-                    allowed_imports_scope=allowed_imports_scope,
-                )
-            except Exception:
-                base = tmpl
-        else:
-            base = (
-                f"你是一个专业的代码性能优化专家。目标是提升 {optimization_target}。\n"
-                f"当前语言：{language}。任务描述：{task_description}\n\n"
-                f"附加要求：{additional_requirements}\n\n"
-                f"本地记忆：{local_memory}\n\n"
-                f"全局记忆：{global_memory}\n\n"
-                f"允许使用的标准导入范围如下：\n"
-                f"{allowed_imports_scope}"
+        if not tmpl:
+            raise ValueError(
+                "config.prompts.system_template 未配置。"
+                "请在 YAML 配置文件的 prompts.system_template 中提供系统模板。"
             )
+
+        try:
+            base = tmpl.format(
+                language=language,
+                optimization_target=optimization_target,
+                task_description=task_description,
+                additional_requirements=additional_requirements,
+                local_memory=local_memory,
+                global_memory=global_memory,
+                allowed_imports_scope=allowed_imports_scope,
+            )
+        except KeyError as e:
+            raise ValueError(
+                f"system_template 格式化失败：缺少占位符 {e}。"
+                f"可用变量: language, optimization_target, task_description, "
+                f"additional_requirements, local_memory, global_memory, allowed_imports_scope"
+            ) from e
 
         if is_functional and starter_code:
             starter_section = (
@@ -436,38 +407,32 @@ class EffiBenchRunner(BaseTaskRunner):
 
         Expected context keys:
             config: PerfAgentConfig 对象
-            language: str（可选，默认从 artifacts 获取）
+            language: str（可选，默认从 task_config 获取）
         """
         config = context.get("config")
-        language = context.get("language") or artifacts.get("language", "python3")
+        language = context.get("language") or artifacts.get("language") or self._task_config.language
         benchmark_results = artifacts.get("benchmark_results", {})
 
-        # 确定代码生成模式
-        code_gen_mode = (
-            getattr(getattr(config, "optimization", None), "code_generation_mode", None)
+        code_gen_mode = self._task_config.code_generation_mode
+
+        # 从 config.prompts.optimization_template 获取模板，必须配置
+        tmpl = (
+            getattr(getattr(config, "prompts", None), "optimization_template", "")
             if config
-            else None
-        ) or self._code_generation_mode
+            else ""
+        )
+        if not tmpl:
+            raise ValueError(
+                "config.prompts.optimization_template 未配置。"
+                "请在 YAML 配置文件的 prompts.optimization_template 中提供优化模板。"
+            )
 
         if code_gen_mode == "direct":
-            tmpl = (
-                getattr(getattr(config, "prompts", None), "optimization_template", "")
-                if config
-                else ""
-            )
-            return tmpl or ""
+            return tmpl
 
-        # diff-based prompt 构建
-        target = artifacts.get("optimization_target", "runtime")
-        include_other = (
-            getattr(
-                getattr(config, "optimization", None),
-                "include_other_metrics_in_summary",
-                True,
-            )
-            if config
-            else True
-        )
+        # diff-based prompt 构建：先准备格式化变量，再填充模板
+        target = artifacts.get("optimization_target") or self._task_config.target
+        include_other = self._task_config.include_other_metrics_in_summary
         metrics_dict, artifacts_dict = self._build_metrics_and_artifacts(
             benchmark_results, target=target, include_other_metrics=include_other
         )
@@ -475,30 +440,18 @@ class EffiBenchRunner(BaseTaskRunner):
         artifacts_md = self._format_artifacts_md(artifacts_dict)
         current_program_md = f"```\n{solution}\n```"
 
-        tmpl = (
-            getattr(getattr(config, "prompts", None), "optimization_template", "")
-            if config
-            else ""
-        )
-        if tmpl:
-            try:
-                return tmpl.format(
-                    current_program=current_program_md,
-                    current_metrics=metrics_md,
-                    current_artifacts_section=artifacts_md,
-                    language=language,
-                )
-            except Exception:
-                pass
-
-        # 回退模板
-        return (
-            "# Task\n"
-            "请分析以下程序信息，并根据系统提示生成 `## Thinking` 与 `## Diffs`：\n\n"
-            "## Current Program\n" + current_program_md + "\n\n"
-            "## Current Metrics\n" + metrics_md + "\n\n"
-            "## Current Artifacts\n" + artifacts_md
-        )
+        try:
+            return tmpl.format(
+                current_program=current_program_md,
+                current_metrics=metrics_md,
+                current_artifacts_section=artifacts_md,
+                language=language,
+            )
+        except KeyError as e:
+            raise ValueError(
+                f"optimization_template 格式化失败：缺少占位符 {e}。"
+                f"可用变量: current_program, current_metrics, current_artifacts_section, language"
+            ) from e
 
     # ------------------------------------------------------------------
     # 解提取
@@ -639,18 +592,17 @@ class EffiBenchRunner(BaseTaskRunner):
         code: str,
         test_cases: list[dict[str, Any]],
         instance: EffiBenchXInstance,
-        config: Any,
     ) -> dict[str, Any]:
         """级联性能评估（单次正确性 → 多次性能）
 
+        使用 self._task_config 中的运行时参数。
         返回原始的 benchmark 结果字典。
         """
-        runtime_cfg = getattr(config, "runtime", None)
-        time_limit = getattr(runtime_cfg, "time_limit", 20) if runtime_cfg else 20
-        memory_limit = getattr(runtime_cfg, "memory_limit", 1024) if runtime_cfg else 1024
-        trim_ratio = getattr(runtime_cfg, "trim_ratio", 0.1) if runtime_cfg else 0.1
-        max_workers = getattr(runtime_cfg, "max_workers", 4) if runtime_cfg else 4
-        num_runs = getattr(runtime_cfg, "num_runs", 10) if runtime_cfg else 10
+        time_limit = self._task_config.time_limit
+        memory_limit = self._task_config.memory_limit
+        trim_ratio = self._task_config.trim_ratio
+        max_workers = self._task_config.max_workers
+        num_runs = self._task_config.num_runs
 
         eval_start_time = time.time()
         self._logger.info(

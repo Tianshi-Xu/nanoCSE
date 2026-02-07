@@ -35,30 +35,24 @@ class RunContext:
     Attributes:
         instance_data: 任务实例数据（不透明，由 TaskRunner 解释）
         trajectory: 轨迹记录器
-        initial_solution: 初始解
         current_solution: 当前解
         best_solution: 最优解
         best_metric: 最优标量指标（越低越好）
         current_artifacts: 当前评估的 artifacts
         best_artifacts: 最优解对应的 artifacts
         optimization_history: 优化历史记录
-        iter_offset: 迭代偏移量（如初始代码来自外部注入则为 1）
         no_improve_count: 连续未改进次数
-        initial_metric: 初始评估的指标值
     """
 
     instance_data: Any
     trajectory: TrajectoryLogger
-    initial_solution: str
     current_solution: str
     best_solution: str
     best_metric: float
     current_artifacts: dict[str, Any]
     best_artifacts: dict[str, Any]
     optimization_history: list[dict[str, Any]]
-    iter_offset: int
     no_improve_count: int = 0
-    initial_metric: float = float("inf")
 
 
 class PerfAgent:
@@ -124,7 +118,7 @@ class PerfAgent:
         from .tasks.effibench import EffiBenchRunner
 
         self.task_runner = EffiBenchRunner(
-            code_generation_mode=self.config.optimization.code_generation_mode,
+            task_config=self.config.task_config,
             _logger=self.logger,
         )
         return self.task_runner
@@ -148,6 +142,9 @@ class PerfAgent:
 
     def run(self, instance_data: Any) -> dict[str, Any]:
         """运行优化流程（通用入口）
+
+        流程：初始化上下文 -> 优化循环 -> 生成结果
+        第一次迭代即生成初始解并评估，不再有独立的"初始评估"步骤。
 
         Args:
             instance_data: 任务实例数据（不透明对象，由 TaskRunner 解释）。
@@ -177,16 +174,13 @@ class PerfAgent:
             init_elapsed = time.time() - init_start
             self.logger.info(f"[上下文初始化完成] 耗时: {init_elapsed:.3f}s")
 
-            # 2. 初始评估
-            self._perform_initial_evaluation(ctx)
-
-            # 3. 优化循环
+            # 2. 优化循环（第一次迭代即生成初始解并评估）
             loop_start = time.time()
             self._process_optimization_loop(ctx)
             loop_elapsed = time.time() - loop_start
             self.logger.info(f"[优化循环完成] 总耗时: {loop_elapsed:.2f}s ({loop_elapsed / 60:.1f}分钟)")
 
-            # 4. 完成并生成结果
+            # 3. 完成并生成结果
             result = self._finalize_run(ctx)
 
             run_elapsed = time.time() - run_start_time
@@ -246,8 +240,6 @@ class PerfAgent:
         # 应用请求中的覆盖参数
         if request.additional_requirements:
             self.config.prompts.additional_requirements = request.additional_requirements
-        if request.initial_solution:
-            self.config.overrides.initial_code_text = request.initial_solution
         if request.local_memory:
             self.config.prompts.local_memory = request.local_memory
         if request.global_memory:
@@ -291,16 +283,6 @@ class PerfAgent:
             log_dir=self.config.logging.log_dir,
         )
 
-        # 设置轨迹元数据（从配置中获取，兼容已有轨迹格式）
-        try:
-            trajectory.metadata.language = self.config.language_cfg.language
-        except AttributeError:
-            pass
-        try:
-            trajectory.metadata.optimization_target = self.config.optimization.target
-        except AttributeError:
-            pass
-
         # 通过 TaskRunner 构建 System Prompt
         system_prompt = runner.build_system_prompt(
             instance_data,
@@ -313,85 +295,18 @@ class PerfAgent:
         if not initial_solution:
             raise ValueError("无法获取初始解")
 
-        # 根据初始代码来源判断迭代偏移
-        initial_code_source = getattr(runner, "initial_code_source", "default")
-        iter_offset = 1 if initial_code_source in ("text", "dir") else 0
-
         # 初始化历史
         self.optimization_history = []
 
         return RunContext(
             instance_data=instance_data,
             trajectory=trajectory,
-            initial_solution=initial_solution,
             current_solution=initial_solution,
             best_solution=initial_solution,
             best_metric=float("inf"),
             current_artifacts={},
             best_artifacts={},
             optimization_history=self.optimization_history,
-            iter_offset=iter_offset,
-        )
-
-    # ==================================================================
-    # 初始评估
-    # ==================================================================
-
-    def _perform_initial_evaluation(self, ctx: RunContext):
-        """执行初始评估"""
-        runner = self._ensure_task_runner()
-        init_eval_start = time.time()
-        instance_id = self._get_instance_id(ctx.instance_data)
-        initial_code_source = getattr(runner, "initial_code_source", "default")
-
-        self.logger.info(
-            f"\n{'=' * 60}\n"
-            f"[初始评估开始] 时间: {datetime.now().strftime('%H:%M:%S')}\n"
-            f"  - 实例ID: {instance_id}\n"
-            f"  - 初始解来源: {initial_code_source}\n"
-            f"  - 初始解长度: {len(ctx.current_solution)} 字符\n"
-            f"{'=' * 60}"
-        )
-
-        step_id = ctx.trajectory.start_step(
-            "initial_evaluation", query="Evaluate the initial solution.", code_snapshot=ctx.current_solution
-        )
-
-        # 通过 TaskRunner 评估
-        initial_metric, initial_artifacts = runner.evaluate(
-            ctx.current_solution, ctx.instance_data, self.config
-        )
-
-        ctx.current_artifacts = initial_artifacts
-        ctx.best_artifacts = initial_artifacts
-        ctx.initial_metric = initial_metric
-
-        if initial_metric <= ctx.best_metric:
-            ctx.best_metric = initial_metric
-            ctx.best_solution = ctx.current_solution
-
-        summary_text = self._build_summary_text(
-            iteration=1 if ctx.iter_offset else 0,
-            code_changed=False,
-            solution=ctx.current_solution,
-            metric=initial_metric,
-            artifacts=initial_artifacts,
-        )
-
-        ctx.trajectory.end_step(
-            step_id,
-            response=summary_text,
-            thought="收集初始性能基线以指导后续优化",
-            code_changed=False,
-            performance_metrics={"metric": initial_metric},
-            code_snapshot=ctx.current_solution,
-        )
-
-        init_eval_elapsed = time.time() - init_eval_start
-        self.logger.info(
-            f"\n[初始评估完成] 时间: {datetime.now().strftime('%H:%M:%S')}, "
-            f"总耗时: {init_eval_elapsed:.2f}s\n"
-            f"  📊 初始 metric: {initial_metric}"
         )
 
     # ==================================================================
@@ -400,15 +315,15 @@ class PerfAgent:
 
     def _process_optimization_loop(self, ctx: RunContext):
         """执行优化循环"""
-        remaining_iterations = max(0, self.config.max_iterations - ctx.iter_offset)
+        remaining_iterations = self.config.max_iterations
 
         self.logger.info(
             f"\n[优化循环开始] 计划迭代次数: {remaining_iterations}, "
-            f"iter_offset: {ctx.iter_offset}, max_iterations: {self.config.max_iterations}"
+            f"max_iterations: {self.config.max_iterations}"
         )
 
         for iteration in range(remaining_iterations):
-            current_iter_num = iteration + 1 + ctx.iter_offset
+            current_iter_num = iteration + 1
 
             should_stop = self._process_single_iteration(ctx, current_iter_num)
             if should_stop:
@@ -624,7 +539,7 @@ class PerfAgent:
             self.logger.info(f"未改进: metric {metric} vs best {ctx.best_metric}")
 
         # 决定是否采用解
-        if self.config.optimization.adopt_only_if_improved:
+        if self.config.adopt_only_if_improved:
             if improved:
                 ctx.current_solution = new_solution
             else:
@@ -647,7 +562,7 @@ class PerfAgent:
         improved: bool,
     ):
         """记录迭代步骤到轨迹"""
-        adopted = improved if self.config.optimization.adopt_only_if_improved else True
+        adopted = improved if self.config.adopt_only_if_improved else True
 
         summary_text = self._build_summary_text(
             iteration=iteration,
@@ -720,22 +635,16 @@ class PerfAgent:
         finalize_start = time.time()
         self.logger.info(f"\n[结果汇总开始] 时间: {datetime.now().strftime('%H:%M:%S')}")
 
-        runner = self._ensure_task_runner()
         instance_id = self._get_instance_id(ctx.instance_data)
-        initial_metric = ctx.initial_metric
         best_metric = ctx.best_metric
-
         executed_iterations = len(ctx.optimization_history)
-        initial_code_source = getattr(runner, "initial_code_source", "default")
-        # 初始代码 + 迭代次数
-        total_iterations = (1 if initial_code_source in ("text", "dir") else 0) + executed_iterations
 
-        success = bool(best_metric < initial_metric)
+        # 只要有有效 metric 就算成功
+        success = bool(best_metric < float("inf"))
 
         # 构建最终 artifacts（确保包含 problem_description）
         artifacts = dict(ctx.best_artifacts)
         artifacts.setdefault("problem_description", "")
-        artifacts["initial_solution"] = ctx.initial_solution
         artifacts["optimization_history"] = ctx.optimization_history
 
         # 记录最终轨迹
@@ -752,15 +661,10 @@ class PerfAgent:
             "solution": ctx.best_solution,
             "metric": best_metric,
             "artifacts": artifacts,
-            "total_iterations": total_iterations,
+            "total_iterations": executed_iterations,
             "trajectory_file": trajectory_file,
             "error": None,
         }
-
-        # 计算改进幅度
-        improvement_pct = 0.0
-        if initial_metric != float("inf") and initial_metric > 0:
-            improvement_pct = (initial_metric - best_metric) / initial_metric * 100
 
         # 统计优化历史
         successful_iterations = sum(1 for h in ctx.optimization_history if h.get("success", False))
@@ -774,9 +678,7 @@ class PerfAgent:
             f"      - 成功改进迭代数: {successful_iterations}\n"
             f"\n"
             f"  📈 性能变化:\n"
-            f"      - 初始 metric: {initial_metric}\n"
             f"      - 最终 metric: {best_metric}\n"
-            f"      - 改进幅度: {improvement_pct:.2f}%\n"
             f"      - 优化成功: {'✅ 是' if success else '❌ 否'}\n"
             f"\n"
             f"  📁 轨迹文件: {trajectory_file}\n"

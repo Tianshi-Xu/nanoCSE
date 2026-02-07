@@ -9,6 +9,7 @@ import pytest
 
 from perfagent.agent import EffiBenchXInstance, PerfAgent
 from perfagent.config import PerfAgentConfig
+from perfagent.tasks.effibench import EffiBenchRunner, EffiBenchTaskConfig
 
 
 class TestPerfAgent:
@@ -22,7 +23,10 @@ class TestPerfAgent:
     @pytest.fixture
     def config(self, temp_dir):
         """创建测试配置"""
-        cfg = PerfAgentConfig(max_iterations=3)
+        cfg = PerfAgentConfig(
+            max_iterations=3,
+            task_config={"language": "python3"},
+        )
         cfg.logging.trajectory_dir = temp_dir
         return cfg
 
@@ -30,6 +34,11 @@ class TestPerfAgent:
     def agent(self, config):
         """创建 PerfAgent 实例"""
         return PerfAgent(config)
+
+    @pytest.fixture
+    def runner(self, config):
+        """创建 EffiBenchRunner 实例"""
+        return EffiBenchRunner(task_config=config.task_config)
 
     def test_yaml_config(self, temp_dir):
         """测试 YAML 配置加载"""
@@ -48,8 +57,8 @@ logging:
         assert config.max_iterations == 5
         assert config.logging.trajectory_dir == Path("/tmp/test")
 
-    def test_extract_initial_code(self, agent):
-        """测试提取初始代码（适配占位符返回）"""
+    def test_get_initial_solution(self, runner):
+        """测试提取初始代码（返回占位符）"""
         inst = EffiBenchXInstance(
             id="inst-1",
             title="",
@@ -59,34 +68,25 @@ logging:
             source="",
             url="",
             type="",
-            starter_code="""def slow_function():\n    result = 0\n    for i in range(1000000):\n        result += i\n    return result\n""",
+            starter_code="def slow_function():\n    pass\n",
         )
 
-        code = agent._extract_initial_code(inst)
+        code = runner.get_initial_solution(inst, None)
         assert isinstance(code, str)
-        assert "# Start your code here" in code  # 当前实现返回占位符
+        assert "# Start your code here" in code
 
-    def test_detect_language(self, agent):
-        """测试语言检测（使用配置语言）"""
-        # 默认配置语言
-        agent.config.language_cfg.language = "python3"
-        inst = EffiBenchXInstance(
-            id="x", title="", title_slug="", description="", description_md="", source="", url="", type=""
-        )
-        assert agent._detect_language(inst) == "python3"
+    def test_task_config_language(self, agent):
+        """测试 task_config 语言配置"""
+        assert agent.config.task_config.get("language") == "python3"
 
-        # 切换到 Java
-        agent.config.language_cfg.language = "java"
-        assert agent._detect_language(inst) == "java"
+        agent.config.task_config["language"] = "java"
+        assert agent.config.task_config["language"] == "java"
 
-        # 切换到 C++
-        agent.config.language_cfg.language = "cpp"
-        assert agent._detect_language(inst) == "cpp"
+        agent.config.task_config["language"] = "cpp"
+        assert agent.config.task_config["language"] == "cpp"
 
-    def test_evaluate_performance(self, agent, temp_dir):
-        """测试性能评估"""
-        # 创建测试数据
-        test_cases = ["test_case_1", "test_case_2"]
+    def test_evaluate_performance(self, runner, temp_dir):
+        """测试性能评估（通过 EffiBenchRunner）"""
         inst = EffiBenchXInstance(
             id="test_instance", title="", title_slug="", description="", description_md="", source="", url="", type=""
         )
@@ -94,7 +94,7 @@ logging:
 import time
 
 def test_function():
-    time.sleep(0.01)  # 模拟一些计算
+    time.sleep(0.01)
     return sum(range(1000))
 
 if __name__ == "__main__":
@@ -104,15 +104,13 @@ if __name__ == "__main__":
     print(f"执行时间: {end_time - start_time:.4f}秒")
     print(f"结果: {result}")
 """
+        # 没有 evaluator 和 test_cases，应返回默认失败结构
+        metric, artifacts = runner.evaluate(code, inst, None)
+        assert isinstance(metric, float)
+        assert "problem_description" in artifacts
 
-        performance = agent._evaluate_performance("python3", code, test_cases, inst)
-
-        # 验证性能指标
-        assert "performance_analysis" in performance
-        assert isinstance(performance["performance_analysis"], dict)
-
-    def test_extract_diff_from_response(self, agent):
-        """测试从响应中提取 diff（仅支持 SEARCH/REPLACE 格式）"""
+    def test_extract_diff_from_response(self, runner):
+        """测试从响应中提取 diff（通过 EffiBenchRunner）"""
         response_with_search_replace = (
             "这里是一些解释文本。\n\n"
             "<<<<<<< SEARCH\n"
@@ -122,19 +120,18 @@ if __name__ == "__main__":
             ">>>>>>> REPLACE\n\n"
             "这是一段额外的说明。"
         )
-        diff = agent._extract_diff_from_response(response_with_search_replace)
+        diff = EffiBenchRunner._extract_diff_from_response(response_with_search_replace)
         assert "<<<<<<< SEARCH" in diff
         assert ">>>>>>> REPLACE" in diff
         assert "line2" in diff and "LINE3" in diff
 
-    def test_extract_diff_no_diff_block(self, agent):
+    def test_extract_diff_no_diff_block(self, runner):
         """测试没有 diff 块的响应"""
         response_without_diff = "这是一个没有 diff 的响应。"
+        diff = EffiBenchRunner._extract_diff_from_response(response_without_diff)
+        assert diff == ""
 
-        diff = agent._extract_diff_from_response(response_without_diff)
-        assert diff == ""  # 应该返回空字符串而不是None
-
-    def test_extract_diff_multiple_blocks(self, agent):
+    def test_extract_diff_multiple_blocks(self, runner):
         """测试多个 SEARCH/REPLACE 区块的响应提取"""
         response_with_multiple_blocks = (
             "前文说明\n\n"
@@ -151,7 +148,7 @@ if __name__ == "__main__":
             ">>>>>>> REPLACE\n"
             "后文文本\n"
         )
-        diff = agent._extract_diff_from_response(response_with_multiple_blocks)
+        diff = EffiBenchRunner._extract_diff_from_response(response_with_multiple_blocks)
         assert diff.count("<<<<<<< SEARCH") == 2
         assert diff.count(">>>>>>> REPLACE") == 2
         assert "oldA" in diff and "newB" in diff
@@ -159,33 +156,41 @@ if __name__ == "__main__":
     def test_agent_initialization(self, config):
         """测试 Agent 初始化"""
         agent = PerfAgent(config)
-
         assert agent.config == config
-        assert agent.diff_applier is not None
 
     def test_config_validation(self):
         """测试配置验证"""
-        # 测试正常配置
         config = PerfAgentConfig(max_iterations=5)
         assert config.max_iterations == 5
 
-        # 测试默认值
         default_config = PerfAgentConfig()
         assert default_config.max_iterations == 10
         assert default_config.model.name == "gpt-4"
 
-    def test_language_detection_edge_cases(self, agent):
-        """测试语言检测的边缘情况（返回配置语言）"""
-        agent.config.language_cfg.language = "python3"  # 默认语言
-        inst = EffiBenchXInstance(
-            id="edge", title="", title_slug="", description="", description_md="", source="", url="", type=""
-        )
+    def test_task_config_defaults(self, agent):
+        """测试 task_config 默认值"""
+        assert agent.config.task_config.get("language") == "python3"
+        assert agent.config.task_config.get("target") is None
 
-        # 空代码
-        assert agent._detect_language(inst) == "python3"
+    def test_effibench_task_config_from_dict(self):
+        """测试 EffiBenchTaskConfig 从字典创建"""
+        tc = EffiBenchTaskConfig.from_dict({
+            "target": "memory",
+            "language": "cpp",
+            "num_runs": 5,
+            "unknown_key": "ignored",
+        })
+        assert tc.target == "memory"
+        assert tc.language == "cpp"
+        assert tc.num_runs == 5
+        # 未知键应被忽略
+        assert not hasattr(tc, "unknown_key")
 
-        # 只有注释的代码
-        assert agent._detect_language(inst) == "python3"
-
-        # 混合语言特征（依然返回配置语言）
-        assert agent._detect_language(inst) == "python3"
+    def test_effibench_task_config_defaults(self):
+        """测试 EffiBenchTaskConfig 默认值"""
+        tc = EffiBenchTaskConfig()
+        assert tc.target == "runtime"
+        assert tc.code_generation_mode == "diff"
+        assert tc.language == "python3"
+        assert tc.time_limit == 20
+        assert tc.num_runs == 10

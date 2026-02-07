@@ -20,14 +20,24 @@ from perfagent.config import PerfAgentConfig, load_config
 
 
 def extract_optimization_info(perf_config_path: str | None) -> tuple[str | None, str | None]:
-    """从 PerfAgent 配置文件中提取优化目标和语言配置。"""
+    """从 PerfAgent 配置文件中提取优化目标和语言配置。
+
+    支持新格式（task_config）和旧格式（optimization/language_cfg）。
+    """
     if not perf_config_path:
         return None, None
     try:
         with open(perf_config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
-        opt_target = config.get("optimization", {}).get("target")
-        language = config.get("language_cfg", {}).get("language")
+        # 新格式：从 task_config 读取
+        task_cfg = config.get("task_config", {}) or {}
+        opt_target = task_cfg.get("target")
+        language = task_cfg.get("language")
+        # 旧格式回退
+        if not opt_target:
+            opt_target = (config.get("optimization", {}) or {}).get("target")
+        if not language:
+            language = (config.get("language_cfg", {}) or {}).get("language")
         target_str = str(opt_target) if isinstance(opt_target, str) and opt_target.strip() else None
         language_str = str(language) if isinstance(language, str) and language.strip() else None
         return target_str, language_str

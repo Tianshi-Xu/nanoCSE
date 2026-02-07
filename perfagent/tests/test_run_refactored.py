@@ -11,11 +11,10 @@ class TestRunRefactored:
     def mock_llm_client(self):
         with patch("perfagent.agent.LLMClient") as mock:
             client_instance = mock.return_value
-            # Configure call_llm to return a diff that "optimizes" code
+            # Configure call_llm to return a diff that replaces the placeholder code
             client_instance.call_llm.return_value = """
 <<<<<<< SEARCH
-def solve():
-    pass
+# Start your code here
 =======
 def solve():
     return 42
@@ -25,20 +24,31 @@ def solve():
 
     @pytest.fixture
     def mock_benchmark(self):
-        with patch("perfagent.agent.run_performance_benchmark") as mock:
+        with patch("perfagent.tasks.effibench.run_performance_benchmark") as mock:
             # We will set side_effect in individual tests
             yield mock
 
     @pytest.fixture
     def config(self, tmp_path):
-        cfg = PerfAgentConfig(max_iterations=1)
+        from conftest import TEST_OPTIMIZATION_TEMPLATE, TEST_SYSTEM_TEMPLATE
+
+        from perfagent.config import PromptConfig
+
+        cfg = PerfAgentConfig(
+            max_iterations=1,
+            task_config={
+                "language": "python3",
+                "num_runs": 5,
+            },
+            prompts=PromptConfig(
+                system_template=TEST_SYSTEM_TEMPLATE,
+                optimization_template=TEST_OPTIMIZATION_TEMPLATE,
+            ),
+        )
         cfg.logging.log_dir = tmp_path / "logs"
         cfg.logging.trajectory_dir = tmp_path / "traj"
         cfg.model.api_key = "dummy"  # Trigger LLM client init
         cfg.model.api_base = "http://dummy"
-        cfg.language_cfg.language = "python3"
-        # Set runtime config for consistent testing
-        cfg.runtime.num_runs = 5
         return cfg
 
     @pytest.fixture
@@ -62,151 +72,93 @@ def solve():
         )
 
     def test_run_success_flow(self, agent, instance, mock_llm_client, mock_benchmark):
-        """Test the full run flow with mocked dependencies."""
+        """Test the full run flow with mocked dependencies.
 
-        # Setup benchmark side effects (4 calls due to cascading evaluation logic)
-        # 1. Initial Single Run (Pass)
-        # 2. Initial Full Run (Pass, Runtime 1.0)
-        # 3. Optimized Single Run (Pass)
-        # 4. Optimized Full Run (Pass, Runtime 0.5 - Improved)
+        New flow: no initial evaluation, just optimization loop.
+        With max_iterations=1:
+        - 1 iteration: single run + full run = 2 benchmark calls
+        """
+
+        # Setup benchmark side effects (2 calls for 1 iteration)
         mock_benchmark.side_effect = [
-            # Initial Evaluation
+            # Iteration 1 - Single Run (Pass)
             {
-                "performance_analysis": {"runtime": 1.0, "memory": 100, "passed": True},
+                "performance_analysis": {"runtime": 0.5, "memory": 100, "passed": True, "pass_rate": 1.0},
                 "pass_rates": [1.0],
                 "failed_test_details": [],
                 "first_run_details": [{"passed": True}],
             },
+            # Iteration 1 - Full Run (Pass, Runtime 0.5)
             {
-                "performance_analysis": {"runtime": 1.0, "memory": 100, "passed": True},
-                "pass_rates": [1.0],
-                "failed_test_details": [],
-                "first_run_details": [{"passed": True}],
-            },
-            # Optimization Iteration 1
-            {
-                "performance_analysis": {"runtime": 0.5, "memory": 100, "passed": True},
-                "pass_rates": [1.0],
-                "failed_test_details": [],
-                "first_run_details": [{"passed": True}],
-            },
-            {
-                "performance_analysis": {"runtime": 0.5, "memory": 100, "passed": True},
+                "performance_analysis": {"runtime": 0.5, "memory": 100, "passed": True, "pass_rate": 1.0},
                 "pass_rates": [1.0],
                 "failed_test_details": [],
                 "first_run_details": [{"passed": True}],
             },
         ]
 
-        # Override _extract_initial_code to return simple code instead of reading from file/config
-        with patch.object(agent, "_extract_initial_code", return_value="def solve():\n    pass"):
-            result = agent.run(instance)
+        result = agent.run(instance)
 
         # Verify result structure
         assert result["success"] is True
         assert result["total_iterations"] >= 1
-        assert result["final_performance"] == 0.5
-        assert result["initial_performance"] == 1.0
-
-        # Verify optimization history
-        assert len(result["optimization_history"]) == 1
-        hist = result["optimization_history"][0]
-        assert hist["success"] is True
-        assert hist["performance_before"] == 1.0
-        assert hist["performance_after"] == 0.5
+        assert result["metric"] == 0.5
 
         # Verify LLM was called
         mock_llm_client.call_llm.assert_called()
 
-        # Verify benchmark was called 4 times
-        assert mock_benchmark.call_count == 4
+        # Verify benchmark was called (2 calls for 1 iteration: single + full)
+        assert mock_benchmark.call_count == 2
 
     def test_run_no_improvement(self, agent, instance, mock_llm_client, mock_benchmark):
-        """Test flow where optimization does not improve performance."""
+        """Test flow where optimization does not improve over placeholder."""
         # Set max_iterations > 1 so we don't force save
         agent.config.max_iterations = 2
         agent.config.early_stop_no_improve = 1  # Stop after 1 failed iter
 
-        # Mock benchmark to show NO improvement (4 calls)
-        # 1. Initial Single Run (Pass)
-        # 2. Initial Full Run (Pass, Runtime 1.0)
-        # 3. Optimized Single Run (Pass)
-        # 4. Optimized Full Run (Pass, Runtime 1.5 - Worse)
+        # Mock benchmark returns failed tests (pass_rate < 1.0)
         mock_benchmark.side_effect = [
-            # Initial Evaluation
+            # Iteration 1 - Single Run (Fail)
             {
-                "performance_analysis": {"runtime": 1.0, "passed": True},
-                "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
-            },
-            {
-                "performance_analysis": {"runtime": 1.0, "passed": True},
-                "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
-            },
-            # Optimization Iteration 1 (Worse performance)
-            {
-                "performance_analysis": {"runtime": 1.5, "passed": True},
-                "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
-            },
-            {
-                "performance_analysis": {"runtime": 1.5, "passed": True},
-                "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
+                "performance_analysis": {"runtime": 1.5, "passed": False, "pass_rate": 0.5},
+                "pass_rates": [0.5],
+                "failed_test_details": [{"status": "wrong_answer"}],
+                "first_run_details": [{"passed": False}],
             },
         ]
 
-        with patch.object(agent, "_extract_initial_code", return_value="def solve():\n    pass"):
-            result = agent.run(instance)
+        result = agent.run(instance)
 
+        # No valid metric means not successful
         assert result["success"] is False
-        assert result["final_performance"] == 1.0  # Kept best (initial)
-
-        hist = result["optimization_history"][0]
-        assert hist["success"] is False
 
     def test_run_single_iteration_forced_save(self, agent, instance, mock_llm_client, mock_benchmark):
-        """Test that single iteration run saves generated code even if performance is worse."""
-        agent.config.runtime.max_iterations = 1
+        """Test that single iteration run saves generated code even if metric is inf."""
+        agent.config.max_iterations = 1
 
-        # Mock benchmark: Initial=1.0, Optimized=2.0 (Worse)
-        # Note: side_effect length depends on implementation.
-        # With single iteration:
-        # 1. Initial Eval (Single)
-        # 2. Initial Eval (Full)
-        # 3. Iter 1 Eval (Single) -> Passed
-        # 4. Iter 1 Eval (Full) -> Runtime 2.0 (Worse)
+        # Mock benchmark: passes but with some metric
         mock_benchmark.side_effect = [
-            # Initial
+            # Iteration 1 - Single Run (Pass)
             {
-                "performance_analysis": {"runtime": 1.0, "passed": True},
+                "performance_analysis": {"runtime": 2.0, "passed": True, "pass_rate": 1.0},
                 "pass_rates": [1.0],
+                "failed_test_details": [],
                 "first_run_details": [{"passed": True}],
             },
+            # Iteration 1 - Full Run (Pass, Runtime 2.0)
             {
-                "performance_analysis": {"runtime": 1.0, "passed": True},
+                "performance_analysis": {"runtime": 2.0, "passed": True, "pass_rate": 1.0},
                 "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
-            },
-            # Optimized
-            {
-                "performance_analysis": {"runtime": 2.0, "passed": True},
-                "pass_rates": [1.0],
-                "first_run_details": [{"passed": True}],
-            },
-            {
-                "performance_analysis": {"runtime": 2.0, "passed": True},
-                "pass_rates": [1.0],
+                "failed_test_details": [],
                 "first_run_details": [{"passed": True}],
             },
         ]
 
-        with patch.object(agent, "_extract_initial_code", return_value="def solve():\n    pass"):
-            result = agent.run(instance)
+        result = agent.run(instance)
 
-        assert result["total_iterations"] == 1  # Initial + 1? No, logic is base 0 for extracted.
-        assert result["final_performance"] == 2.0  # Saved the worse one
-        assert result["success"] is False  # Because it got worse
-        assert len(result["optimization_history"]) == 1
-        assert result["optimization_history"][0]["success"] is True  # Forced success flag
+        assert result["total_iterations"] == 1
+        assert result["metric"] == 2.0
+        # With single iteration mode, the result is force-saved
+        assert result["success"] is True
+        assert len(result["artifacts"]["optimization_history"]) == 1
+        assert result["artifacts"]["optimization_history"][0]["success"] is True  # Forced success flag

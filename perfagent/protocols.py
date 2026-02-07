@@ -86,7 +86,6 @@ class AgentRequest:
     Attributes:
         task_data_path: 任务数据文件路径（由 TaskRunner 负责加载和解析）
         config: Agent 配置（任意配置对象，当前为 PerfAgentConfig）
-        initial_solution: 来自算子的初始解（可选覆盖）
         additional_requirements: 算子策略文本（可选）
         local_memory: 本地记忆内容（可选）
         global_memory: 全局记忆内容（可选）
@@ -96,7 +95,6 @@ class AgentRequest:
     task_data_path: Path
     config: Any  # 通常为 PerfAgentConfig，保持通用以解耦
     # 可选覆盖 / 上下文参数
-    initial_solution: str | None = None
     additional_requirements: str | None = None
     local_memory: str | None = None
     global_memory: str | None = None
@@ -113,7 +111,6 @@ class AgentRequest:
         return {
             "task_data_path": str(self.task_data_path),
             "config": config_dict,
-            "initial_solution": self.initial_solution,
             "additional_requirements": self.additional_requirements,
             "local_memory": self.local_memory,
             "global_memory": self.global_memory,
@@ -140,7 +137,6 @@ class AgentRequest:
         return cls(
             task_data_path=Path(data["task_data_path"]),
             config=config,
-            initial_solution=data.get("initial_solution"),
             additional_requirements=data.get("additional_requirements"),
             local_memory=data.get("local_memory"),
             global_memory=data.get("global_memory"),
