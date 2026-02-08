@@ -6,8 +6,12 @@ perfagent.tasks — 任务特定 TaskRunner 实现
 """
 
 from .effibench import EffiBenchRunner, EffiBenchXInstance
+from .livecodebench import LiveCodeBenchRunner, LCBInstance, LCBTaskConfig
 
 __all__ = [
     "EffiBenchRunner",
     "EffiBenchXInstance",
+    "LiveCodeBenchRunner",
+    "LCBInstance",
+    "LCBTaskConfig",
 ]

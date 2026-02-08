@@ -109,11 +109,14 @@ class BaseTaskRunner(ABC):
         返回一个标量指标和一个 artifacts 字典。
 
         约定:
-        - metric 统一为 **越低越好**（lower is better）。若原始指标是越高越好
-          （如 pass rate），应在此方法中取反后返回。
-        - artifacts 必须包含 ``"problem_description"`` 键。
-        - artifacts 中可包含任意任务特定信息（如 optimization_history、
-          test_results、reasoning_trace 等），SE_Perf 层不对其做假设。
+        - metric 的比较方向由 PerfAgentConfig.metric_higher_is_better 控制：
+          - False（默认）：越小越好，如运行时间、错误率
+          - True：越大越好，如准确率、通过率
+          TaskRunner 可以选择直接返回原始指标（如 pass rate 0-1），
+          由 Agent 配置控制比较方向，或自行转换后统一返回
+        - artifacts 是任务特定的评估补充信息，SE_Perf 层不对其内容做假设。
+          例如：test_results、failure_details、evaluation_metadata 等。
+          注意：artifacts 不应包含 problem_description，它已经在顶层提供。
 
         Args:
             solution: 待评估的解

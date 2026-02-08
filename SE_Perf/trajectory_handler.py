@@ -38,26 +38,23 @@ def build_trajectory_from_result(
     operator_name: str | None,
     output_dir: Path,
 ) -> TrajectoryData:
-    """直接从 AgentResult 构建轨迹数据，避免文件 I/O 中转。"""
-    # 从优化历史构建轨迹内容
-    tra_parts: list[str] = []
-    optimization_history = result.artifacts.get("optimization_history") or []
-    for step in optimization_history:
-        step_str = f"Step {step.get('iteration', '?')}: "
-        metric_val = step.get("metric")
-        if metric_val is None:
-            metric_val = step.get("metric_after", step.get("metric"))
-        if metric_val is not None:
-            step_str += f"metric={metric_val}"
-        if step.get("code_changed") or step.get("success"):
-            step_str += " [code changed]"
-        tra_parts.append(step_str)
+    """直接从 AgentResult 构建轨迹数据，避免文件 I/O 中转。
+    优先使用已生成的 .tra 文件内容作为 trajectory_content，与磁盘一致且为 JSON 可解析；
+    仅当 .tra 不存在或读取失败时，才从 optimization_history 拼摘要。
+    """
+    tra_path = Path(output_dir) / f"{instance_name}.tra"
+    trajectory_content = ""
+    if tra_path.exists():
+        try:
+            trajectory_content = tra_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            trajectory_content = ""
 
     return TrajectoryData(
         label=label,
         instance_name=instance_name,
         problem_description=problem_description,
-        trajectory_content="\n".join(tra_parts),
+        trajectory_content=trajectory_content,
         solution=result.solution or "",
         metric=result.metric,
         artifacts=result.artifacts or {},

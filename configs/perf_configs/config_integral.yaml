@@ -3,8 +3,10 @@
 # 迭代控制
 max_iterations: 1
 early_stop_no_improve: 0
-max_workers: 10  # 批量并发的顶层控制（run_batch 并发度）
 adopt_only_if_improved: false
+# metric 比较方向：false=越小越好(默认)，true=越大越好
+# 对于 EffiBench integral 任务，metric 越小越好
+metric_higher_is_better: false
 
 # 模型配置
 model:

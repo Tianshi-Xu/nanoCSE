@@ -7,6 +7,7 @@ Agent 不直接处理任务特定的数据结构，所有任务特定操作均�
 
 import logging
 import time
+import math
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,11 +38,16 @@ class RunContext:
         trajectory: 轨迹记录器
         current_solution: 当前解
         best_solution: 最优解
-        best_metric: 最优标量指标（越低越好）
+        best_metric: 最优标量指标
         current_artifacts: 当前评估的 artifacts
         best_artifacts: 最优解对应的 artifacts
         optimization_history: 优化历史记录
         no_improve_count: 连续未改进次数
+    
+    Note:
+        best_metric 的比较方向由 PerfAgentConfig.metric_higher_is_better 控制：
+        - False（默认）：越小越好，如运行时间、错误率
+        - True：越大越好，如准确率、通过率
     """
 
     instance_data: Any
@@ -92,12 +98,16 @@ class PerfAgent:
                 request_timeout=self.config.model.request_timeout,
             )
 
-        # 设置日志：统一绑定到单一文件
-        # 使用包含日志目录名的唯一 logger 名称，避免并发实例复用同名导致串写
-        agent_logger_name = f"perfagent.agent.{Path(self.config.logging.log_dir).name}"
+        # 设置日志：统一绑定到当前 run 的 log_dir 下的 perfagent.log
+        # 同一算子多结果时（如 Plan 出 5 个 sol）会多次执行 PerfAgent，每次 log_dir 为 iteration_N/instance_id。
+        # 必须用含迭代信息的 logger 名，否则复用同一 logger 会全部写到 iteration_1 的目录。
+        log_dir_path = Path(self.config.logging.log_dir)
+        parts = log_dir_path.parts
+        logger_suffix = "_".join(parts[-2:]) if len(parts) >= 2 else log_dir_path.name
+        agent_logger_name = f"perfagent.agent.{logger_suffix}"
         get_se_logger(
             agent_logger_name,
-            Path(self.config.logging.log_dir) / "perfagent.log",
+            log_dir_path / "perfagent.log",
             emoji="🔧",
             level=getattr(logging, self.config.logging.log_level.upper()),
             also_stream=False,
@@ -292,18 +302,26 @@ class PerfAgent:
 
         # 通过 TaskRunner 获取初始解
         initial_solution = runner.get_initial_solution(instance_data, self.config)
-        if not initial_solution:
+        if initial_solution is None:
             raise ValueError("无法获取初始解")
 
         # 初始化历史
         self.optimization_history = []
+
+        # 根据配置方向初始化 best_metric
+        if self.config.metric_higher_is_better:
+            # 越大越好：从负无穷开始
+            initial_best_metric = -float("inf")
+        else:
+            # 越小越好：从正无穷开始（默认）
+            initial_best_metric = float("inf")
 
         return RunContext(
             instance_data=instance_data,
             trajectory=trajectory,
             current_solution=initial_solution,
             best_solution=initial_solution,
-            best_metric=float("inf"),
+            best_metric=initial_best_metric,
             current_artifacts={},
             best_artifacts={},
             optimization_history=self.optimization_history,
@@ -509,10 +527,15 @@ class PerfAgent:
     ) -> bool:
         """更新上下文并判断是否改进
 
-        使用通用的 metric 比较（越低越好）。TaskRunner 的 evaluate() 方法
-        负责确保 metric 语义一致（如测试未通过时返回 inf）。
+        根据配置的 metric_higher_is_better 决定比较方向：
+        - metric_higher_is_better=True: metric 越大越好
+        - metric_higher_is_better=False: metric 越小越好（默认）
         """
-        improved = metric < ctx.best_metric
+        # 根据配置方向判断是否改进
+        if self.config.metric_higher_is_better:
+            improved = metric > ctx.best_metric  # 越大越好
+        else:
+            improved = metric < ctx.best_metric  # 越小越好（默认）
 
         # 如果最大迭代次数为 1，强制视为改进（即总是保存生成代码）
         if self.config.max_iterations == 1 and not improved:
@@ -520,12 +543,23 @@ class PerfAgent:
             self.logger.info("单次迭代模式：强制采纳生成解作为最佳结果")
 
         # 记录历史
+        # 处理 JSON unsafe 值 (Infinity, -Infinity, NaN)
+        def _make_json_safe(val):
+            if isinstance(val, float):
+                if math.isinf(val) or math.isnan(val):
+                    return None  # 将 Infinity/-Infinity/NaN 转换为 null
+            return val
+
+        metric_before_safe = _make_json_safe(ctx.best_metric)
+        metric_after_safe = _make_json_safe(metric)
+        improvement_safe = _make_json_safe(ctx.best_metric - metric) if metric_before_safe is not None and metric_after_safe is not None else None
+
         ctx.optimization_history.append(
             {
                 "iteration": iteration,
-                "metric_before": ctx.best_metric,
-                "metric_after": metric,
-                "improvement": ctx.best_metric - metric,
+                "metric_before": metric_before_safe,
+                "metric_after": metric_after_safe,
+                "improvement": improvement_safe,
                 "success": improved,
             }
         )
@@ -639,13 +673,16 @@ class PerfAgent:
         best_metric = ctx.best_metric
         executed_iterations = len(ctx.optimization_history)
 
-        # 只要有有效 metric 就算成功
-        success = bool(best_metric < float("inf"))
+        # 根据配置方向判断成功
+        if self.config.metric_higher_is_better:
+            # 越大越好：只要不是 -inf 就算成功
+            success = bool(best_metric > -float("inf"))
+        else:
+            # 越小越好：只要不是 inf 就算成功（默认）
+            success = bool(best_metric < float("inf"))
 
         # 构建最终 artifacts（确保包含 problem_description）
         artifacts = dict(ctx.best_artifacts)
-        artifacts.setdefault("problem_description", "")
-        artifacts["optimization_history"] = ctx.optimization_history
 
         # 记录最终轨迹
         trajectory_file = ctx.trajectory.finalize(

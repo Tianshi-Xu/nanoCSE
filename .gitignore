@@ -98,12 +98,10 @@ htmlcov/
 
 
 #editable 安装的文件
-sweagent.egg-info/
+cse.egg-info/
 
 # 项目特定文件
 context.md
-
-
 counter_example/counter_generation/default*
 counter_example/counter_generation/filtered*
 default/
@@ -116,7 +114,6 @@ preds
 
 # 环境
 .venv/
-cse.egg-info/
 
 # 数据文件
 trajectories_perf/*
@@ -126,3 +123,4 @@ analysis/*
 report/*
 data/*
 output/*
+instances/livecodebench/

@@ -1,0 +1,53 @@
+# PerfAgent 基础配置 - LiveCodeBench
+
+# 通用配置
+max_iterations: 5
+early_stop_no_improve: 3
+adopt_only_if_improved: false
+# metric 比较方向：false=越小越好(默认)，true=越大越好
+# 对于 LiveCodeBench，TaskRunner 返回原始通过率（1.0=通过，0.0=不通过），所以设置为越大越好
+metric_higher_is_better: true
+
+
+# 轨迹与日志
+logging:
+  save_trajectory: true
+  trajectory_dir: "./trajectories"
+  log_level: "INFO"
+
+# Prompt 模板
+prompts:
+  system_template: |
+    You are an expert Python programmer. 
+    You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.
+    
+    ## Problem Description
+    {question_content}
+
+    ## Starter Code (Optional)
+    If the question provides a starter code, you should use it to write your solution.
+    If not, you should write your own solution from scratch.
+    ```python
+    {starter_code}
+    ```
+
+    ## Context
+    **Additional Requirements**: {additional_requirements}
+    **Local Memory**: {local_memory}
+    **Global Memory**: {global_memory}
+
+    ## Instructions
+    1. Write a complete, correct, and efficient Python solution
+    2. Ensure your code handles all edge cases
+    3. Follow the exact input/output format specified in the problem
+    4. Return your final solution in a markdown code block with python language identifier
+    5. If context provides additional requirements or memory, you should follow them to improve the solution.
+
+  optimization_template: |
+    Using all information in context, generate a new solution to improve the metric of the solution.
+
+# 任务特定配置
+task_config:
+  timeout: 6
+  use_only_public_tests: false
+  enable_detailed_feedback: true

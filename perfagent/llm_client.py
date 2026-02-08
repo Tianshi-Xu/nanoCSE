@@ -53,8 +53,9 @@ class LLMClient:
         self.config = model_config
         # 统一使用文件日志（带 emoji），与 IO 日志同目录
         self.io_log_path = Path(io_log_path) if io_log_path else Path("./logs/llm_io.log")
-        # Logger 名称增加任务名后缀（取日志目录名），避免并发任务冲突
-        task_suffix = self.io_log_path.parent.name or "default"
+        # Logger 名称需含迭代信息（与 agent 一致），否则同一实例多迭代时复用同一 logger，日志全进 iteration_1
+        parent_parts = self.io_log_path.parent.parts
+        task_suffix = "_".join(parent_parts[-2:]) if len(parent_parts) >= 2 else (self.io_log_path.parent.name or "default")
         logger_name = f"perfagent.llm_client.{task_suffix}"
         get_se_logger(logger_name, self.io_log_path, emoji="🤖", also_stream=False)
         self.logger = logging.getLogger(logger_name)
@@ -202,11 +203,10 @@ class LLMClient:
 
                 # 使用基本的OpenAI客户端调用，遵循api_test.py的工作模式
                 # 不使用额外参数，避免服务器错误
-                model_to_use = "/".join(self.config["name"].split("/")[1:])
-                self.logger.debug(f"调用模型: {model_to_use}, max_tokens={max_tokens}")
+                self.logger.debug(f"调用模型: {model_name}, max_tokens={max_tokens}")
 
                 response = self.client.chat.completions.create(
-                    model=model_to_use,
+                    model=model_name,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -242,7 +242,7 @@ class LLMClient:
                             entry = {
                                 "ts": time.time(),
                                 "context": usage_context or "perfagent",
-                                "model": "/".join(self.config["name"].split("/")[1:]),
+                                "model": self.config["name"],
                                 "prompt_tokens": getattr(response.usage, "prompt_tokens", None),
                                 "completion_tokens": getattr(response.usage, "completion_tokens", None),
                                 "total_tokens": getattr(response.usage, "total_tokens", None),
@@ -267,7 +267,7 @@ class LLMClient:
                         io_entry = {
                             "ts": time.time(),
                             "context": usage_context or "perfagent",
-                            "model": "/".join(self.config["name"].split("/")[1:]),
+                            "model": self.config["name"],
                             "temperature": temperature,
                             "max_tokens": max_tokens,
                             "attempt_index": attempt,

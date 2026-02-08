@@ -3,7 +3,6 @@
 # 迭代控制
 max_iterations: 2
 early_stop_no_improve: 0
-max_workers: 5  # 批量并发的顶层控制（run_batch 并发度）
 adopt_only_if_improved: false
 
 # 模型配置

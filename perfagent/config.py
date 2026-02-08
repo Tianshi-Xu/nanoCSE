@@ -64,11 +64,11 @@ class PerfAgentConfig:
     max_iterations: int = 10
     # 早停控制：连续未改进达到阈值后停止；0 表示不启用
     early_stop_no_improve: int = 0
-    # 顶层并发控制（用于批量并行运行 run.py 子进程）
-    max_workers: int = 4
 
     # 从 OptimizationConfig 提升的通用字段
     adopt_only_if_improved: bool = False
+    # metric 比较方向：False=越小越好(默认)，True=越大越好
+    metric_higher_is_better: bool = False
 
     # 组件配置
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -89,8 +89,6 @@ class PerfAgentConfig:
         # 基础覆盖
         if getattr(args, "max_iterations", None) is not None:
             self.max_iterations = args.max_iterations
-        if getattr(args, "max_workers", None) is not None:
-            self.max_workers = args.max_workers
         if getattr(args, "model", None):
             self.model.name = args.model
         if getattr(args, "trajectory_dir", None):
@@ -144,8 +142,6 @@ class PerfAgentConfig:
         """验证配置参数"""
         if self.max_iterations < 0:
             raise ValueError("max_iterations must be non-negative")
-        if self.max_workers < 1:
-            raise ValueError("max_workers must be at least 1")
         if not (0.0 <= self.model.temperature <= 1.0):
             raise ValueError("model.temperature must be between 0.0 and 1.0")
 
@@ -211,7 +207,7 @@ class PerfAgentConfig:
         # 顶层标量字段
         max_iterations = cfg.get("max_iterations", 10)
         early_stop_no_improve = cfg.get("early_stop_no_improve", 0)
-        max_workers = cfg.get("max_workers", 4)
+        metric_higher_is_better = cfg.get("metric_higher_is_better", False)
 
         return cls(
             max_iterations=max_iterations,
@@ -219,8 +215,8 @@ class PerfAgentConfig:
             logging=logging_cfg,
             prompts=prompts_cfg,
             early_stop_no_improve=early_stop_no_improve,
-            max_workers=max_workers,
             adopt_only_if_improved=adopt_only_if_improved,
+            metric_higher_is_better=metric_higher_is_better,
             task_config=task_config,
         )
 

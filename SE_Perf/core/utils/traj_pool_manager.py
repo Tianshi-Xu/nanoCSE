@@ -524,11 +524,6 @@ class TrajPoolManager:
             else:
                 trajectory_raw_obj = raw_content
 
-            # 从 item 或全局配置中获取语言和优化目标
-            cfg = self.prompt_config.get("summarizer", {}) if self.prompt_config else {}
-            lang = item.get("language") or cfg.get("language") or "Unknown"
-            target = item.get("optimization_target") or cfg.get("optimization_target") or "Runtime"
-
             return {
                 "label": item["label"],
                 "instance_name": item["instance_name"],
@@ -542,8 +537,6 @@ class TrajPoolManager:
                 "trajectory_raw": trajectory_raw_obj,
                 "source_entry_labels": item.get("source_entry_labels"),
                 "operator_name": item.get("operator_name"),
-                "language": lang,
-                "optimization_target": target,
                 "meta": {"summary_enabled": bool(do_summary)},
             }
         except Exception as e:
