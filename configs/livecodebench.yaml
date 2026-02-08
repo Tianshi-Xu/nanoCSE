@@ -6,17 +6,17 @@
 task_type: livecodebench
 
 model:
-  name:
-  api_base:
-  api_key:
+  name: stepfun/step-3.5-flash:free
+  api_base: https://openrouter.ai/api/v1
+  api_key: 
   max_output_tokens: 30000
   temperature: 0.7
 
 # 算子模型配置
 operator_models:
-  name:
-  api_base:
-  api_key:
+  name: stepfun/step-3.5-flash:free
+  api_base: https://openrouter.ai/api/v1
+  api_key: 
   max_input_tokens: 30000
   max_output_tokens: 30000
   temperature: 0.7
@@ -24,23 +24,101 @@ operator_models:
 operator_selection_mode: weighted
 
 local_memory:
-  enabled: true
-  format_mode: short
+  enabled: false
+
+global_memory_bank:
+  enabled: false
 
 # 实例配置
 instances:
   instances_dir: instances/
 
-output_dir: "trajectories_perf/livecodebench_{timestamp}"
-num_workers: 20
+output_dir: "trajectories_perf/livecodebench_test_{timestamp}"
 
 prompt_config:
   summarizer:
     enable_summary: true
-    language: ""   # 从实例数据自动检测
-    optimization_target: "pass_rate"
-    # system_prompt / user_prompt_template 可在此覆盖；
-    # 留空则使用 TrajSummarizer 内置的通用默认值。
+    system_prompt: |
+      You are an AI assistant specialized in analyzing code-generation trajectories for competitive programming problems (e.g. LeetCode, Codeforces, AtCoder).
+
+      The sole objective is to produce a correct Python solution that passes ALL test cases. The evaluation is binary: 1.0 if every test passes, 0.0 otherwise. Failures may manifest as Wrong Answer (WA), Time Limit Exceeded (TLE), or Runtime Error (RE) — but these are all simply reasons why the solution did not pass. Correctness is the only metric.
+
+      Your goal is to summarize the agent's iterative attempt: what solutions were tried, which passed or failed, what correctness issues were discovered, and how they were (or were not) resolved.
+
+      You will be given:
+      1. A problem description
+      2. A trajectory file (.tra) in JSON format with the agent's step-by-step execution and chat history
+      3. The final solution code (use this as the definitive "final_solution" when present)
+
+      Return your analysis in JSON format with the following fields:
+
+      - "solution_name": A short nickname for the final solution (e.g. "two_pointers", "dp_v2").
+
+      - "approach_summary": A concise high-level narrative of the agent's journey and final approach (how the problem was solved, or why it still fails).
+
+      - "analysis": High-level insights from the trajectory.
+        - "best_strategy": Object describing the best correct solution achieved (or null if none passed all tests).
+          - "high_level": Why this approach is correct in one sentence.
+          - "algorithmic_choices": e.g. ["two pointers", "hash map"].
+          - "data_structures": e.g. ["dict", "list"].
+        - "root_causes_of_failures": List of { "iteration": N, "cause": "what correctness issue caused the failure" }. Categorize each as: logic bug, missed edge case, misunderstood problem, TLE (algorithm too slow for constraints), or RE (runtime crash).
+        - "key_learnings": Generalizable correctness insights — edge cases to watch for, invariants to maintain, input format pitfalls, and patterns that help avoid bugs for this problem type.
+
+    user_prompt_template: |
+      Analyze the following code-generation trajectory. The agent's goal was to produce a Python solution that passes ALL test cases (binary metric: pass or fail).
+
+      Problem description:
+      {problem_description}
+
+      Trajectory data (.tra file):
+      {trajectory_content}
+
+      Final solution:
+      {solution_content}
+
+      Provide your analysis in the JSON format specified in the system prompt.
+
+  reflection_refine:
+    header: |
+      ### STRATEGY MODE: REFLECTION AND REFINE STRATEGY
+      Your previous attempt at solving this competitive programming problem in Python did not pass all test cases.
+      The only goal is correctness — producing a solution that passes every test case. Analyze why the previous attempt failed and fix it.
+
+      Failures fall into these categories (all equally prevent passing):
+      - **Wrong Answer (WA)**: Logic bug, missed edge case, misunderstood problem statement, or incorrect algorithm.
+      - **Runtime Error (RE)**: Crash due to index out of bounds, division by zero, recursion depth exceeded, or type errors.
+      - **Time Limit Exceeded (TLE)**: The algorithm is too slow for the problem's input constraints.
+      Identify which category applies, then focus your fix accordingly.
+    guidelines: |
+      ### REFINEMENT GUIDELINES
+      1. **Identify Failure Type**: From the trajectory, determine what went wrong. Was it WA (wrong output on some test cases), RE (code crashed), or TLE (too slow)? This determines your fix strategy.
+      2. **Fix Logical Errors** (most common): Check for wrong conditions, off-by-one errors, incorrect state transitions, wrong data structure invariants, or misunderstanding of the problem statement. Re-read the problem carefully and verify your algorithm matches the specification.
+      3. **Handle Edge Cases**: Explicitly consider: empty input, n=1, maximum constraint values, negative numbers, duplicate elements, and any boundary conditions mentioned in the problem. Many WA failures come from missing edge cases.
+      4. **Fix Resource Failures (if TLE/RE)**: Only if the failure is TLE or RE, consider:
+         - TLE: Switch to a better algorithm (e.g., O(n^2) to O(n log n), brute-force to DP, linear scan to binary search). The goal is not to optimize for speed — it is to make the solution fast enough to pass within time limits.
+         - RE: Fix crashes — set sys.setrecursionlimit for deep recursion, handle division by zero, fix index bounds, use iterative approaches instead of recursive ones if stack overflows.
+      5. **Verify Correctness**: Before submitting, mentally trace through the algorithm with small examples (including edge cases) to confirm it produces the correct output.
+
+  crossover:
+    header: |
+      ### STRATEGY MODE: CROSSOVER STRATEGY
+      You are given two previous attempts at solving a competitive programming problem in Python. Neither fully passes all test cases.
+      Your task is to combine the correct parts of both attempts to produce a single solution that passes ALL test cases.
+
+      Analyze each trajectory to understand:
+      - Which parts of each solution's logic are correct and which have bugs
+      - Which test cases each solution passes or fails, and why
+      - Whether either solution has edge case handling that the other lacks
+      - If either failed due to TLE/RE, what caused it
+    guidelines: |
+      ### SYNTHESIS GUIDELINES
+      1. **Identify Correct Components**: Determine which parts of each solution produce correct outputs. One solution may handle certain input patterns correctly while failing on others.
+         - Example: If T1 correctly solves the general case but misses an edge case that T2 handles, take T1's core logic and add T2's edge case handling.
+         - Example: If T1 has a correct algorithm but crashes on large inputs (RE), and T2 handles large inputs but has a logic bug, use T1's algorithm with T2's input handling.
+      2. **Correctness Priority**: Heavily favor the trajectory that passes more test cases. Use its core logic as the foundation, and incorporate specific fixes from the other trajectory only where needed.
+      3. **Avoid Inherited Bugs**: If both trajectories fail on the same test cases, you MUST introduce a novel fix for those cases — do not copy either broken approach.
+      4. **Handle Resource Failures Conditionally**: If either solution failed due to TLE or RE, ensure the combined solution avoids that specific issue (e.g., use the faster algorithm from one trajectory if the other had TLE, or fix the crash from one using the safer implementation of the other).
+      5. **Clean Integration**: Produce a single cohesive, correct Python solution — not a concatenation of code fragments. The merged logic must be consistent and handle all cases uniformly.
 
 max_iterations: 1
 
@@ -52,21 +130,12 @@ strategy:
   iterations:
     # 初始化：生成 K=5 个初始解
     - operator: "plan"
-      num: 5
-      trajectory_labels: ["sol1", "sol2", "sol3", "sol4", "sol5"]
+      num: 2
+      trajectory_labels: ["sol1", "sol2"]
 
     # 进化：交替使用 reflection_refine 和 crossover
     - operator: "reflection_refine"
-      trajectory_label: "sol6"
+      trajectory_label: "sol3"
 
     - operator: "crossover"
-      trajectory_label: "sol7"
-
-    - operator: "reflection_refine"
-      trajectory_label: "sol8"
-
-    - operator: "crossover"
-      trajectory_label: "sol9"
-
-    - operator: "reflection_refine"
-      trajectory_label: "sol10"
+      trajectory_label: "sol4"
