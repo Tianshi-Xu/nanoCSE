@@ -2,7 +2,7 @@ from openai import OpenAI
 
 client = OpenAI(
   base_url="https://openrouter.ai/api/v1",
-  api_key="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",
+  api_key="",
 )
 
 # First API call with reasoning
