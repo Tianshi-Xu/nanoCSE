@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
         "api_key": "",
         # "name": "qwen/qwen3-4b:free",
         # "api_base": "https://openrouter.ai/api/v1",
-        # "api_key": "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",
+        # "api_key": "",
         "max_output_tokens": 16384,
         "temperature": 0.7,
         "top_k": 20,
