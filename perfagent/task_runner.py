@@ -15,6 +15,7 @@ BaseTaskRunner 抽象接口
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,76 @@ class BaseTaskRunner(ABC):
         """
         ...
 
+    @classmethod
+    def load_metadata_from_dict(cls, data: dict[str, Any], file_path: Path | None = None) -> TaskMetadata:
+        """从字典中提取最小元数据（无需文件 I/O）
+
+        子类应覆盖此方法以实现任务特定的字段映射。
+        默认实现尝试从常见字段名中提取。
+
+        Args:
+            data: 实例数据字典
+            file_path: 可选的文件路径（用于推断 instance_id）
+
+        Returns:
+            TaskMetadata，包含 instance_id 和 problem_description
+        """
+        instance_id = (
+            data.get("id")
+            or data.get("instance_id")
+            or data.get("problem_id")
+            or (file_path.stem if file_path else None)
+            or "unknown"
+        )
+        problem_description = (
+            data.get("problem")
+            or data.get("problem_description")
+            or data.get("question")
+            or data.get("description")
+            or ""
+        )
+        return TaskMetadata(
+            instance_id=str(instance_id),
+            problem_description=str(problem_description),
+        )
+
+    # ------------------------------------------------------------------
+    # 批量加载（支持 JSON / JSONL）
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load_all_from_file(cls, path: Path) -> list[dict[str, Any]]:
+        """从 JSON 或 JSONL 文件中加载所有实例的原始字典列表
+
+        - ``.json``  文件：若顶层为 list 则返回列表，否则包装为单元素列表。
+        - ``.jsonl`` 文件：逐行解析，跳过空行。
+
+        Args:
+            path: 输入文件路径（.json 或 .jsonl）
+
+        Returns:
+            实例字典列表
+        """
+        path = Path(path)
+        instances: list[dict[str, Any]] = []
+
+        if path.suffix == ".jsonl":
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        instances.append(json.loads(line))
+        elif path.suffix == ".json":
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                instances.extend(data)
+            else:
+                instances.append(data)
+        else:
+            raise ValueError(f"不支持的文件格式: {path.suffix}，仅支持 .json 和 .jsonl")
+
+        return instances
+
     # ------------------------------------------------------------------
     # 数据加载
     # ------------------------------------------------------------------
@@ -71,6 +142,21 @@ class BaseTaskRunner(ABC):
             任务数据对象（类型由子类定义）
         """
         ...
+
+    def load_instance_from_dict(self, data: dict[str, Any], file_path: Path | None = None) -> Any:
+        """从字典创建任务数据对象（无需文件 I/O）
+
+        子类应覆盖此方法以返回任务特定的数据类型。
+        默认实现直接返回原始字典。
+
+        Args:
+            data: 实例数据字典
+            file_path: 可选的文件路径（用于补充元信息）
+
+        Returns:
+            任务数据对象（类型由子类定义）
+        """
+        return data
 
     # ------------------------------------------------------------------
     # 初始解

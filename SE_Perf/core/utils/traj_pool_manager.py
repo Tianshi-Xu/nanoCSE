@@ -37,6 +37,7 @@ class TrajPoolManager:
         llm_client=None,
         memory_manager: Optional["LocalMemoryManager"] = None,  # noqa: F821
         prompt_config: dict[str, Any] | None = None,
+        metric_higher_is_better: bool = False,
     ):
         """
         初始化轨迹池管理器。
@@ -55,6 +56,7 @@ class TrajPoolManager:
         self.memory_manager = memory_manager
         self.prompt_config = prompt_config or {}
         self._best_label: str | None = None
+        self.metric_higher_is_better = bool(metric_higher_is_better)
 
     # -----------------------------------------------------------------------
     # 池的加载 / 保存 / 初始化
@@ -539,9 +541,9 @@ class TrajPoolManager:
                     if s in ("inf", "+inf", "infinity", "+infinity"):
                         val = float("inf")
                     elif s in ("-inf", "-infinity"):
-                        val = float("inf")
+                        val = float("-inf")
                     elif s == "nan":
-                        val = float("inf")
+                        val = float("nan")
                     else:
                         val = float(s)
                 else:
@@ -562,7 +564,10 @@ class TrajPoolManager:
 
         finite = [c for c in candidates if math.isfinite(c[1])]
         if finite:
-            finite.sort(key=lambda t: (t[1], -t[2]))
+            if self.metric_higher_is_better:
+                finite.sort(key=lambda t: (-t[1], -t[2]))
+            else:
+                finite.sort(key=lambda t: (t[1], -t[2]))
             return finite[0][0]
         candidates.sort(key=lambda t: (-t[2], t[0]))
         return candidates[0][0]

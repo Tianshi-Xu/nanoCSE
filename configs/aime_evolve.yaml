@@ -1,0 +1,239 @@
+# SE Configuration for AIME (Mathematical Reasoning) - evolve
+# Task: Solve AIME competition math problems
+
+# 任务类型
+task_type: aime
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  api_base: "http://127.0.0.1:37993/v1"
+  api_key: "EMPTY"
+  max_output_tokens: 16384
+  temperature: 1.0
+
+# 算子模型配置
+operator_models:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  api_base: "http://127.0.0.1:37993/v1"
+  api_key: "EMPTY"
+  max_input_tokens: 16384
+  max_output_tokens: 16384
+  temperature: 1.0
+
+operator_selection_mode: weighted
+
+local_memory:
+  enabled: false
+
+global_memory_bank:
+  enabled: false
+
+# 实例配置
+instances:
+  instances_dir: instances/
+
+output_dir: "trajectories_perf/aime_evolve_{timestamp}"
+
+prompt_config:
+  plan:
+    header: |
+      ### ROLE: DIVERSE MATH STRATEGIST (Generating {num} distinct approaches)
+      You must generate {num} MUTUALLY EXCLUSIVE mathematical strategies.
+      Avoid "Mode Collapse" where all strategies produce the same possibly wrong answer.
+      Your goal is to cover different mathematical "angles".
+    guidelines: |
+      ### DIVERSITY REQUIREMENTS
+      Generate diverse strategies by varying core methodologies. Assign roughly an equal number of strategies to each category below:
+
+      - **Type A: Standard Analytical Approach**. Use standard theorems, formulas, and direct derivation. (Best for general problems).
+      - **Type B: Constructive / Creative Counting**. Build the solution case-by-case or use complementary counting. (Best for Combinatorics/Probability).
+      - **Type C: Transformation / Mapping**. Convert the problem to a different domain (e.g., Geometry -> Coordinates/Complex Plane, Algebra -> Geometric Interpretation, Trig -> Polynomials).
+      - **Type D: Pattern Recognition / Small Cases**. Test n=1, 2, 3... to find a sequence pattern or invariant. (Best for Number Theory/Sequences).
+
+      Ensure each strategy interprets the problem slightly differently if possible (e.g., check for edge cases in definition).
+
+  summarizer:
+    enable_summary: true
+    system_prompt: |
+      You are a CRITICAL mathematical logic auditor.
+      
+      Your goal is to ruthlessly evaluate the provided solution trajectory.
+      The evaluation is binary: score = 1.0 if correct, score = -1.0 otherwise.
+
+      CRITICAL RULES:
+      1. If score is -1.0, the reasoning IS FLAWED. Do NOT say "it correctly identifies..." unless you specify exactly what small part was right.
+      2. Detect HALLUCINATIONS: If the final answer is not a positive integer (AIME format 000-999) or contradicts the problem constraints, Flag it.
+      3. Do NOT make up reasoning that isn't in the trajectory. Summarize ONLY what the model actually thought.
+      4. If the logic fails, your summary must explicitly state WHY it failed.
+
+      Return JSON with fields:
+      - "solution_name"
+      - "approach_summary" (Be factual: "The model attempted X, but failed because Y...")
+      - "analysis": {"best_strategy", "root_causes_of_failures", "key_learnings"}
+
+    user_prompt_template: |
+      Analyze the following math-solving trajectory.
+
+      Problem statement:
+      {problem_description}
+
+      Trajectory data (.tra file):
+      {trajectory_content}
+
+      Final solution:
+      {solution_content}
+
+      Provide your analysis in the JSON format specified above.
+  reflection_refine:
+    header: |
+      ### STRATEGY MODE: REFLECTION AND REFINE STRATEGY\nYou must explicitly reflect on the previous trajectory and implement concrete improvements.
+    guidelines: |
+      ### REFINEMENT GUIDELINES
+      1. **Diagnose**: Identify the exact logical gap or invalid assumption in the prior solution.
+      2. **Fixes**: Provide a corrected mathematical step or argument that directly repairs the gap.
+      3. **Maintain Correctness**: Re-check constraints and edge cases (domains, parity, divisibility, bounds).
+      4. **Final Answer**: State the corrected final answer clearly in AIME format (000-999).
+
+
+  # 【新增】针对 Crossover 的数学专用 Prompt
+  crossover:
+    header: |
+      ### STRATEGY MODE: CROSSOVER STRATEGY\nYou are tasked with synthesizing a SUPERIOR hybrid solution by intelligently combining the best elements of two prior optimization trajectories described below.
+    guidelines: |
+      ### SYNTHESIS GUIDELINES
+      1. **Complementary Combination**: Combine the strongest correct arguments from both solutions.
+      2. **Resolve Conflicts**: If the two solutions disagree, identify which step is invalid and replace it with a correct argument.
+      3. **Fill Gaps**: If both solutions miss a key case or assumption, add the missing reasoning explicitly.
+      4. **Maintain Rigor**: Ensure all constraints (domains, parity, divisibility, bounds) are enforced.
+      5. **Final Answer**: Provide the final answer clearly in AIME format (000-999).
+
+
+max_iterations: 1
+
+# 基础配置引用
+base_config: "configs/perf_configs/config_aime_evolve.yaml"
+
+# 策略编排
+# 策略编排
+strategy:
+  iterations:
+    # ==========================================================================
+    # Initialization: Planner generates K=5 initial solutions
+    # ==========================================================================
+    - operator: "plan"
+      num: 5
+      trajectory_labels: ["iter1_sol1", "iter1_sol2", "iter1_sol3", "iter1_sol4", "iter1_sol5"]
+
+    # ==========================================================================
+    # Evolution: 10 hard-coded steps of exploration and exploitation
+    # Operators will use weighted selection from the entire pool of trajectories.
+    # ==========================================================================
+
+    # Step 1: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter1_sol6"
+
+    # Step 2: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter1_sol7"
+
+    # Step 3: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter1_sol8"
+
+    # Step 4: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter1_sol9"
+
+    # Step 5: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter1_sol10"
+
+    # Step 6: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter1_sol11"
+
+    # Step 7: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter1_sol12"
+
+    # Step 8: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter1_sol13"
+
+    # Step 9: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter1_sol14"
+
+    # Step 10: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter1_sol15"
+
+    # Iteration 2 
+    # ==========================================================================
+    # Evolution: 10 hard-coded steps of exploration and exploitation
+    # ==========================================================================
+
+    # Step 1: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter2_sol1"
+
+    # Step 2: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter2_sol2"
+
+    # Step 3: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter2_sol3"
+
+    # Step 4: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter2_sol4"
+
+    # Step 5: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter2_sol5"
+
+    # Step 6: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter2_sol6"
+
+    # Step 7: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter2_sol7"
+
+    # Step 8: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter2_sol8"
+
+    # Step 9: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter2_sol9"
+
+    # Step 10: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter2_sol10"
+
+    # Iteration 3
+    # ==========================================================================
+    # Evolution: 10 hard-coded steps of exploration and exploitation
+    # ==========================================================================
+
+    # Step 1: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter3_sol1"
+
+    # Step 2: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter3_sol2"
+
+    # Step 3: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter3_sol3"
+
+    # Step 4: Crossover
+    - operator: "crossover"
+      trajectory_label: "iter3_sol4"
+
+    # Step 5: Reflection and Refine
+    - operator: "reflection_refine"
+      trajectory_label: "iter3_sol5"

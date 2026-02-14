@@ -134,18 +134,54 @@ class LLMClient:
                 # 生成可选的 extra_body，用于控制是否启用思考模板
                 extra_body: dict[str, Any] = {}
                 if enable_thinking is not None:
-                    extra_body = {"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}}
+                    # 适配 Qwen3-4B 等模型
+                    extra_body = {"enable_thinking": bool(enable_thinking)}
 
-                response = self.client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **({"extra_body": extra_body} if extra_body else {}),
-                )
+                try:
+                    response_iterator = self.client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=True,
+                        **({"extra_body": extra_body} if extra_body else {}),
+                    )
 
-                # 提取响应内容
-                content = response.choices[0].message.content
+                    content = ""
+                    reasoning_content = ""
+                    is_answering = False
+                    usage = None
+
+                    for chunk in response_iterator:
+                        if not chunk.choices:
+                            if hasattr(chunk, "usage"):
+                                usage = chunk.usage
+                            continue
+                            
+                        delta = chunk.choices[0].delta
+
+                        # 处理思考过程
+                        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                            reasoning_content += delta.reasoning_content
+
+                        # 处理正式回复
+                        if hasattr(delta, "content") and delta.content:
+                            content += delta.content
+
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            usage = chunk.usage
+
+                    # 构建伪 Response 对象以兼容后续逻辑
+                    class MockResponse:
+                        pass
+                    response = MockResponse()
+                    from types import SimpleNamespace
+                    response.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
+                    response.usage = usage
+
+                except Exception as stream_err:
+                     self.logger.error(f"流式请求失败: {stream_err}")
+                     raise stream_err
 
                 # 记录使用情况
                 if getattr(response, "usage", None):
@@ -154,6 +190,7 @@ class LLMClient:
                         f"输出={getattr(response.usage, 'completion_tokens', '未知')}, "
                         f"总计={getattr(response.usage, 'total_tokens', '未知')}"
                     )
+
                     try:
                         if self.token_log_path:
                             entry = {
@@ -336,7 +373,7 @@ class TrajectorySummarizer:
                 # 去除思考内容
                 response = self.llm_client.clean_think_tags(response)
                 self.logger.debug(f"LLM清理后响应 (迭代{iteration}, 第{attempt}次):\n{response}")
-
+                ## TODO: use json_repair instead of json
                 summary = summarizer.parse_response(response)
                 summarizer.validate_response_format(summary)
 

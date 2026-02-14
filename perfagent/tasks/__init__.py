@@ -5,10 +5,14 @@ perfagent.tasks — 任务特定 TaskRunner 实现
 实现 BaseTaskRunner 接口，使 Agent 核心循环保持任务无关。
 """
 
+from .aime import AIMERunner, AIMEConfig, AIMEInstance
 from .effibench import EffiBenchRunner, EffiBenchXInstance
 from .livecodebench import LiveCodeBenchRunner, LCBInstance, LCBTaskConfig
 
 __all__ = [
+    "AIMERunner",
+    "AIMEConfig",
+    "AIMEInstance",
     "EffiBenchRunner",
     "EffiBenchXInstance",
     "LiveCodeBenchRunner",

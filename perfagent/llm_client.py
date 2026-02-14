@@ -144,7 +144,10 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int | None = None,
         usage_context: str | None = None,
-    ) -> str:
+        return_full_response: bool = False,
+        extra_params: dict[str, Any] | None = None,
+        stream: bool = False,
+    ) -> str | dict[str, Any]:
         """
         调用LLM并返回响应内容
 
@@ -205,30 +208,80 @@ class LLMClient:
                 # 不使用额外参数，避免服务器错误
                 self.logger.debug(f"调用模型: {model_name}, max_tokens={max_tokens}")
 
-                response = self.client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                # 定义标准 OpenAI 参数集合
+                standard_params = {'model', 'messages', 'temperature', 'max_tokens', 'top_p', 'frequency_penalty', 'presence_penalty', 'stop', 'stream', 'seed', 'tools', 'tool_choice', 'logit_bias', 'logprobs', 'top_logprobs', 'response_format', 'user'}
+                
+                # 基础请求参数
+                request_kwargs = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": stream,
+                }
+                
+                # 处理额外参数
+                extra_body = {}
+                if extra_params:
+                    for k, v in extra_params.items():
+                        if v is not None:
+                            if k in standard_params:
+                                request_kwargs[k] = v
+                            else:
+                                # 对于非标准参数（如 top_k），放入 extra_body
+                                extra_body[k] = v
+                
+                if extra_body:
+                    request_kwargs["extra_body"] = extra_body
 
-                # 检查响应是否有效 - 空 choices 视为可重试错误
-                if not response.choices:
-                    self.logger.warning(
-                        f"API返回空choices (尝试 {attempt + 1}/{self.max_retries}), Response: {response}"
-                    )
-                    # 空响应时进行重试
-                    attempt += 1  # 递增重试计数
-                    if attempt < self.max_retries:
-                        time.sleep(self.retry_delay * attempt)
-                        continue
-                    else:
-                        raise ValueError(
-                            f"API返回空choices，已重试{self.max_retries}次。Response id: {response.id}, model: {response.model}"
-                        )
+                # 强制使用流式以支持 Thinking
+                # 无论是否传了 stream=True，都使用流式来获取 reasoning_content
+                request_kwargs["stream"] = True
+                
+                try:
+                    response_iterator = self.client.chat.completions.create(**request_kwargs)
+                    content = ""
+                    reasoning_content = ""
+                    finish_reason = "unknown"
+                    usage = None
+                    is_answering = False
+                    
+                    for chunk in response_iterator:
+                        if not chunk.choices:
+                            if hasattr(chunk, "usage"):
+                                usage = chunk.usage
+                            continue
 
-                # 提取响应内容
-                content = response.choices[0].message.content
+                        delta = chunk.choices[0].delta
+                        
+                        # 捕获思考内容
+                        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                                reasoning_content += delta.reasoning_content
+                        
+                        # 捕获正文内容
+                        if hasattr(delta, "content") and delta.content:
+                            content += delta.content
+                            
+                        if chunk.choices[0].finish_reason:
+                            finish_reason = chunk.choices[0].finish_reason
+
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            usage = chunk.usage
+                    
+                    class MockResponse:
+                        pass
+                    response = MockResponse()
+                    from types import SimpleNamespace
+                    msg = SimpleNamespace(content=content)
+                    # 如果需要，可以将 reasoning_content 挂载到 message 上
+                    # msg.reasoning_content = reasoning_content
+                    response.choices = [SimpleNamespace(message=msg, finish_reason=finish_reason)]
+                    response.usage = usage
+
+                except Exception as stream_err:
+                    # 如果流式特定错误可以捕获处理，否则抛出
+                    raise stream_err
+
 
                 # 记录使用情况
                 if getattr(response, "usage", None):
@@ -332,6 +385,8 @@ class LLMClient:
                     f"  - 响应长度: {len(content) if content else 0} 字符"
                 )
 
+                if return_full_response:
+                    return {"content": content, "finish_reason": finish_reason}
                 return content
 
             except Exception as e:

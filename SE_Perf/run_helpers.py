@@ -7,6 +7,7 @@ perf_run 辅助函数
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
 from typing import Any
 
 import yaml
@@ -43,6 +44,25 @@ def extract_optimization_info(perf_config_path: str | None) -> tuple[str | None,
         return target_str, language_str
     except Exception:
         return None, None
+
+
+@lru_cache(maxsize=32)
+def load_metric_higher_is_better(perf_config_path: str | None) -> bool:
+    """从 PerfAgent 配置中读取 metric 方向，默认 False（越小越好）。"""
+    if not perf_config_path:
+        return False
+    path = Path(perf_config_path)
+    if not path.exists():
+        # 尝试相对 SE_Perf 根目录解析
+        path = Path(__file__).resolve().parent.parent / perf_config_path
+    if not path.exists():
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return bool(cfg.get("metric_higher_is_better", False))
+    except Exception:
+        return False
 
 
 def retrieve_global_memory(
@@ -110,8 +130,11 @@ def build_operator_context(se_cfg: SEPerfRunSEConfig, step: StepConfig) -> Opera
         pc = step.prompt_config.to_dict()
     else:
         pc = se_cfg.prompt_config.to_dict()
+    perf_config_path = step.perf_base_config or se_cfg.base_config
+    metric_higher_is_better = load_metric_higher_is_better(perf_config_path)
     return OperatorContext(
         model_config=se_cfg.model.to_dict(),
         prompt_config=pc,
         selection_mode=step.selection_mode or "weighted",
+        metric_higher_is_better=metric_higher_is_better,
     )

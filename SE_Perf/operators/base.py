@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc
 import random
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from core.utils.llm_client import LLMClient
@@ -127,6 +128,7 @@ class OperatorContext:
     model_config: dict[str, Any] = field(default_factory=dict)
     prompt_config: dict[str, Any] = field(default_factory=dict)
     selection_mode: str = "weighted"
+    metric_higher_is_better: bool = False
 
 
 @dataclass
@@ -221,36 +223,65 @@ class BaseOperator(abc.ABC):
     def _weighted_select_labels(
         self, entry: InstanceTrajectories, k: int = 1, allowed_labels: list[str] | None = None
     ) -> list[str]:
-        """基于 performance 的线性加权采样选择子标签，performance 越低权重越高。
+        """基于 performance 的线性加权采样选择子标签。
+        - metric_higher_is_better=False: 越小越好
+        - metric_higher_is_better=True: 越大越好
         若提供 allowed_labels，则仅在该集合中进行采样（忽略不存在的标签）。
         """
-        items: list[tuple[str, float]] = []
+        items: list[tuple[str, float | None]] = []
         for subkey, traj in entry.trajectories.items():
             if allowed_labels is not None:
                 if subkey not in allowed_labels and (not traj.label or traj.label not in allowed_labels):
                     continue
-            perf_val = traj.metric if traj.metric is not None else 1.0
-            items.append((subkey, perf_val))
+            items.append((subkey, traj.metric))
         if not items:
             return []
-        eps = 1e-9
+
+        def _to_float(val: float | None) -> float | None:
+            if val is None:
+                return None
+            try:
+                v = float(val)
+            except (ValueError, TypeError):
+                return None
+            if not math.isfinite(v):
+                return None
+            return v
+
+        eps = 1e-6
         selected: list[str] = []
         remaining = items.copy()
+        higher_is_better = bool(self.context.metric_higher_is_better)
+
         for _ in range(min(k, len(remaining))):
-            weights = [max(0.001, 1.0 / max(eps, perf)) for _, perf in remaining]
-            total = sum(weights)
-            if total <= 0:
+            values = [_to_float(perf) for _, perf in remaining]
+            finite_vals = [v for v in values if v is not None]
+            if not finite_vals:
                 choice = random.choice(remaining)[0]
             else:
-                weights = [w / total for w in weights]
-                r = random.random()
-                s = 0.0
-                choice = remaining[-1][0]
-                for (label_key, perf), w in zip(remaining, weights):
-                    s += w
-                    if r <= s:
-                        choice = label_key
-                        break
+                min_val = min(finite_vals)
+                max_val = max(finite_vals)
+                rng = max_val - min_val
+                if rng <= 0:
+                    weights = [1.0 for _ in remaining]
+                else:
+                    if higher_is_better:
+                        weights = [((v - min_val) / rng) if v is not None else 0.0 for v in values]
+                    else:
+                        weights = [((max_val - v) / rng) if v is not None else 0.0 for v in values]
+                weights = [w + eps for w in weights]
+                total = sum(weights)
+                if total <= 0:
+                    choice = random.choice(remaining)[0]
+                else:
+                    r = random.random()
+                    s = 0.0
+                    choice = remaining[-1][0]
+                    for (label_key, _), w in zip(remaining, weights):
+                        s += w / total
+                        if r <= s:
+                            choice = label_key
+                            break
             selected.append(choice)
             remaining = [it for it in remaining if it[0] != choice]
         return selected

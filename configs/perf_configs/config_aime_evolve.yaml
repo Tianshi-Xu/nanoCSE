@@ -1,0 +1,37 @@
+# PerfAgent 基础配置 - AIME (evolve)
+
+# 通用配置
+max_iterations: 5
+early_stop_no_improve: 2
+adopt_only_if_improved: false
+# metric 比较方向：false=越小越好(默认)，true=越大越好
+# AIME 返回 score: 正确=1.0, 错误=-1.0
+metric_higher_is_better: true
+
+# 轨迹与日志
+logging:
+  save_trajectory: true
+  trajectory_dir: "./trajectories"
+  log_level: "ERROR"
+
+# Prompt 模板
+prompts:
+  system_template: |
+    You are an expert competition mathematician solving an AIME-style problem.
+
+    ## Problem Statement
+    {problem_statement}
+
+    ## Context
+    **Additional Requirements**: {additional_requirements}
+    ## Instructions
+    1. Solve the problem carefully with clear reasoning.
+    2. The final answer should be a single integer (AIME format 0-999).
+    3. Output the final answer in the following text format, the answer format must be: \\boxed{{'The final answer goes here.'}}
+
+  optimization_template: |
+    Using the context below, improve the solution for correctness.
+
+# 任务特定配置
+task_config:
+  strict_box_verify: false
